@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# fstack-profile: pretty-print and summarize the developer profile
+#
+# Usage:
+#   fstack-profile show                  # human-friendly summary
+#   fstack-profile json                  # raw profile json
+#   fstack-profile vibe                  # one-line archetype
+#   fstack-profile dimensions            # dimensions only, key=value form
+#   fstack-profile stack                 # stack only, plain English
+
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
+BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
+CONFIG="$BIN_DIR/fstack-config"
+
+if ! "$CONFIG" exists; then
+  echo "fstack-profile: not initialized. run /fstack to set up" >&2
+  exit 1
+fi
+
+CONFIG_FILE="$("$CONFIG" path)"
+
+# Band label for 0..1 score
+_band() {
+  local v="$1" low_label="$2" mid_label="$3" high_label="$4"
+  if [ -z "$v" ] || [ "$v" = "null" ]; then echo "unset"; return; fi
+  awk -v v="$v" -v lo="$low_label" -v mi="$mid_label" -v hi="$high_label" 'BEGIN {
+    if (v < 0.35) print lo;
+    else if (v < 0.65) print mi;
+    else print hi;
+  }'
+}
+
+cmd="${1:-show}"
+
+case "$cmd" in
+  json)
+    jq '.profile' "$CONFIG_FILE"
+    ;;
+  dimensions)
+    jq -r '.profile.developer | to_entries | .[] | "\(.key)=\(.value)"' "$CONFIG_FILE"
+    ;;
+  stack)
+    jq -r '
+      .stack
+      | to_entries
+      | map(select(.key != "declared_at" and (.value | type == "array") and (.value | length > 0)))
+      | .[]
+      | "\(.key): \(.value | join(", "))"
+    ' "$CONFIG_FILE"
+    ;;
+  vibe)
+    # Build a simple archetype from declared dimensions
+    risk="$(jq -r '.profile.developer.risk_tolerance // empty' "$CONFIG_FILE")"
+    action="$(jq -r '.profile.developer.bias_for_action // empty' "$CONFIG_FILE")"
+    scope="$(jq -r '.profile.developer.scope_appetite // empty' "$CONFIG_FILE")"
+    arch="$(jq -r '.profile.developer.architecture_care // empty' "$CONFIG_FILE")"
+    if [ -z "$risk$action$scope$arch" ]; then
+      echo "unset. run /fstack-profile setup to declare yours"
+      exit 0
+    fi
+    # Crude but useful labeling
+    risk_b="$(_band "${risk:-0.5}" cautious balanced bold)"
+    action_b="$(_band "${action:-0.5}" deliberate balanced shipper)"
+    scope_b="$(_band "${scope:-0.5}" lean balanced ambitious)"
+    arch_b="$(_band "${arch:-0.5}" pragmatic balanced principled)"
+    echo "$risk_b · $action_b · $scope_b · $arch_b"
+    ;;
+  show|"")
+    risk="$(jq -r '.profile.developer.risk_tolerance // empty' "$CONFIG_FILE")"
+    action="$(jq -r '.profile.developer.bias_for_action // empty' "$CONFIG_FILE")"
+    scope="$(jq -r '.profile.developer.scope_appetite // empty' "$CONFIG_FILE")"
+    rigor="$(jq -r '.profile.developer.test_rigor // empty' "$CONFIG_FILE")"
+    arch="$(jq -r '.profile.developer.architecture_care // empty' "$CONFIG_FILE")"
+    declared_at="$(jq -r '.profile.declared_at // "never"' "$CONFIG_FILE")"
+    samples="$(jq -r '.profile.inferred.sample_count // 0' "$CONFIG_FILE")"
+
+    echo "DEVELOPER PROFILE"
+    printf "  risk_tolerance:    %s\n" "${risk:-unset} ($(_band "${risk:-0.5}" cautious balanced bold))"
+    printf "  bias_for_action:   %s\n" "${action:-unset} ($(_band "${action:-0.5}" deliberate balanced shipper))"
+    printf "  scope_appetite:    %s\n" "${scope:-unset} ($(_band "${scope:-0.5}" lean balanced ambitious))"
+    printf "  test_rigor:        %s\n" "${rigor:-unset} ($(_band "${rigor:-0.5}" happy-path balanced full-coverage))"
+    printf "  architecture_care: %s\n" "${arch:-unset} ($(_band "${arch:-0.5}" pragmatic balanced principled))"
+
+    echo ""
+    echo "PREFERENCES"
+    jq -r '.profile.preferences | to_entries | .[] | "  \(.key): \(.value // "unset")"' "$CONFIG_FILE"
+
+    echo ""
+    echo "STACK"
+    "$0" stack | sed 's/^/  /'
+
+    echo ""
+    echo "Declared at: $declared_at"
+    echo "Observations logged: $samples"
+    ;;
+  *)
+    echo "fstack-profile: unknown command '$cmd'" >&2
+    exit 2
+    ;;
+esac

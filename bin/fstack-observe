@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# fstack-observe: log implicit signals about the user's preferences
+#
+# Each observation is one JSON line in ~/.fstack/observations.jsonl:
+#   {"ts":"...","skill":"...","dimension":"...","signal":0.0..1.0,"weight":1,"context":"..."}
+#
+# Usage:
+#   fstack-observe log <dimension> <signal> [--weight N] [--skill NAME] [--context TEXT]
+#   fstack-observe rollup                 # update profile.inferred.rolling from log
+#   fstack-observe show [--limit N]       # tail recent observations
+#
+# Dimensions match developer profile fields: risk_tolerance, bias_for_action,
+# scope_appetite, test_rigor, architecture_care.
+# Signal is 0..1 where 0 means low (cautious / deliberate / lean) and 1 means high.
+
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
+BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
+CONFIG="$BIN_DIR/fstack-config"
+
+FSTACK_DIR="${FSTACK_HOME:-$HOME/.fstack}"
+LOG_FILE="$FSTACK_DIR/observations.jsonl"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "fstack-observe: jq is required" >&2
+  exit 1
+fi
+
+if ! "$CONFIG" exists; then
+  echo "fstack-observe: not initialized" >&2
+  exit 1
+fi
+
+CONFIG_FILE="$("$CONFIG" path)"
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  log)
+    dim="${1:-}"; signal="${2:-}"; shift 2 || true
+    if [ -z "$dim" ] || [ -z "$signal" ]; then
+      echo "usage: fstack-observe log <dimension> <signal 0..1> [--weight N] [--skill X] [--context T]" >&2
+      exit 2
+    fi
+    weight=1; skill=""; context=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --weight) weight="$2"; shift 2;;
+        --skill) skill="$2"; shift 2;;
+        --context) context="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    mkdir -p "$FSTACK_DIR"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -nc \
+      --arg ts "$ts" --arg skill "$skill" --arg dim "$dim" \
+      --arg context "$context" \
+      --argjson signal "$signal" --argjson weight "$weight" \
+      '{ts:$ts, skill:$skill, dimension:$dim, signal:$signal, weight:$weight, context:$context}' \
+      >> "$LOG_FILE"
+    ;;
+  rollup)
+    [ -f "$LOG_FILE" ] || { echo "no observations yet"; exit 0; }
+    # Compute weighted mean per dimension
+    rolling_json="$(jq -s '
+      group_by(.dimension)
+      | map({
+          key: .[0].dimension,
+          value: (
+            (map(.signal * .weight) | add)
+            / (map(.weight) | add)
+          )
+        })
+      | from_entries
+    ' "$LOG_FILE")"
+    sample_count="$(wc -l < "$LOG_FILE" | tr -d ' ')"
+    last_ts="$(tail -1 "$LOG_FILE" | jq -r '.ts')"
+
+    tmp="$(mktemp "${CONFIG_FILE}.XXXXXX")"
+    jq --argjson rolling "$rolling_json" \
+       --argjson count "$sample_count" \
+       --arg last "$last_ts" \
+       '.profile.inferred.rolling = $rolling
+        | .profile.inferred.sample_count = $count
+        | .profile.inferred.last_observation_at = $last' \
+       "$CONFIG_FILE" > "$tmp"
+    mv "$tmp" "$CONFIG_FILE"
+    echo "rolled up $sample_count observations across $(jq -r 'keys | length' <<<"$rolling_json") dimensions"
+    ;;
+  show)
+    [ -f "$LOG_FILE" ] || { echo "no observations yet"; exit 0; }
+    limit=20
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --limit) limit="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    tail -n "$limit" "$LOG_FILE" | jq -r '"\(.ts)  \(.skill // "?")  \(.dimension)=\(.signal)  \(.context // "")"'
+    ;;
+  gap)
+    # Plain-English drift between declared and observed
+    jq -r '
+      .profile.developer as $d
+      | (.profile.inferred.rolling // {}) as $r
+      | [
+          ["risk_tolerance",     $d.risk_tolerance,     $r.risk_tolerance],
+          ["bias_for_action",    $d.bias_for_action,    $r.bias_for_action],
+          ["scope_appetite",     $d.scope_appetite,     $r.scope_appetite],
+          ["test_rigor",         $d.test_rigor,         $r.test_rigor],
+          ["architecture_care",  $d.architecture_care,  $r.architecture_care]
+        ]
+      | .[]
+      | select(.[1] != null and .[2] != null)
+      | "\(.[0]): declared=\(.[1]) observed=\(.[2]) gap=\(((.[1] - .[2]) * 100 | floor) / 100 | tostring)"
+    ' "$CONFIG_FILE"
+    ;;
+  ""|help|-h|--help)
+    sed -n '2,15p' "$0"
+    ;;
+  *)
+    echo "fstack-observe: unknown command '$cmd'" >&2
+    exit 2
+    ;;
+esac

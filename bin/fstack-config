@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# fstack-config: read and write fields in ~/.fstack/config.json
+#
+# Usage:
+#   fstack-config get <dot.path>            # prints value (empty if missing)
+#   fstack-config set <dot.path> <value>    # writes value (auto-detects type)
+#   fstack-config set-json <dot.path> <json>  # writes raw JSON value
+#   fstack-config exists                    # exit 0 if config file exists
+#   fstack-config path                      # prints config file path
+#   fstack-config init [source_path]        # creates config from template
+#   fstack-config show                      # prints full config
+
+set -euo pipefail
+
+CONFIG_DIR="${FSTACK_HOME:-$HOME/.fstack}"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+TEMPLATE_FILE=""
+
+# Locate the template by walking up from this script
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _self="$(readlink "$_self")"
+done
+_script_dir="$(cd "$(dirname "$_self")" && pwd)"
+if [ -f "$_script_dir/../config.template.json" ]; then
+  TEMPLATE_FILE="$(cd "$_script_dir/.." && pwd)/config.template.json"
+fi
+
+_require_jq() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "fstack-config: jq is required (brew install jq)" >&2
+    exit 1
+  fi
+}
+
+_atomic_write() {
+  local path="$1" content="$2"
+  local tmp
+  tmp="$(mktemp "${path}.XXXXXX")"
+  printf '%s\n' "$content" > "$tmp"
+  mv "$tmp" "$path"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  path)
+    echo "$CONFIG_FILE"
+    ;;
+  exists)
+    [ -f "$CONFIG_FILE" ]
+    ;;
+  init)
+    _require_jq
+    mkdir -p "$CONFIG_DIR"
+    if [ -f "$CONFIG_FILE" ]; then
+      echo "$CONFIG_FILE already exists" >&2
+      exit 1
+    fi
+    if [ -z "$TEMPLATE_FILE" ] || [ ! -f "$TEMPLATE_FILE" ]; then
+      echo "fstack-config: template not found" >&2
+      exit 1
+    fi
+    source_path="${1:-}"
+    installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq --arg sp "$source_path" --arg at "$installed_at" \
+       '.install.source_path = $sp | .install.installed_at = $at' \
+       "$TEMPLATE_FILE" > "$CONFIG_FILE.tmp"
+    mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    echo "$CONFIG_FILE"
+    ;;
+  show)
+    _require_jq
+    if [ ! -f "$CONFIG_FILE" ]; then
+      echo "fstack-config: not initialized (run fstack-config init)" >&2
+      exit 1
+    fi
+    cat "$CONFIG_FILE"
+    ;;
+  get)
+    _require_jq
+    key="${1:-}"
+    if [ -z "$key" ]; then
+      echo "usage: fstack-config get <dot.path>" >&2
+      exit 2
+    fi
+    [ -f "$CONFIG_FILE" ] || { echo ""; exit 0; }
+    # Convert dot path to jq path
+    jq_path=".$key"
+    val="$(jq -r "$jq_path // empty" "$CONFIG_FILE" 2>/dev/null || true)"
+    printf '%s' "$val"
+    ;;
+  set)
+    _require_jq
+    key="${1:-}"
+    val="${2:-}"
+    if [ -z "$key" ]; then
+      echo "usage: fstack-config set <dot.path> <value>" >&2
+      exit 2
+    fi
+    [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
+    jq_path=".$key"
+    # Auto-detect type: number, bool, null, else string
+    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+      new_json="$(jq "$jq_path = ($val)" "$CONFIG_FILE")"
+    elif [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
+      new_json="$(jq "$jq_path = $val" "$CONFIG_FILE")"
+    else
+      new_json="$(jq --arg v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
+    fi
+    _atomic_write "$CONFIG_FILE" "$new_json"
+    ;;
+  set-json)
+    _require_jq
+    key="${1:-}"
+    val="${2:-}"
+    if [ -z "$key" ]; then
+      echo "usage: fstack-config set-json <dot.path> <json>" >&2
+      exit 2
+    fi
+    [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
+    jq_path=".$key"
+    new_json="$(jq --argjson v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new_json"
+    ;;
+  ""|help|-h|--help)
+    sed -n '2,15p' "$0"
+    ;;
+  *)
+    echo "fstack-config: unknown command '$cmd'" >&2
+    exit 2
+    ;;
+esac

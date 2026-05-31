@@ -1,0 +1,46 @@
+{
+  "version": "0.1.0",
+  "install": {
+    "mode": "dev",
+    "install_path": "~/.claude/skills",
+    "source_path": "",
+    "installed_at": "",
+    "installed_skills": []
+  },
+  "profile": {
+    "developer": {
+      "risk_tolerance": null,
+      "bias_for_action": null,
+      "scope_appetite": null,
+      "test_rigor": null,
+      "architecture_care": null
+    },
+    "preferences": {
+      "code_style": null,
+      "comment_level": null,
+      "abstraction": null,
+      "error_handling": null,
+      "type_safety": null
+    },
+    "declared_at": null,
+    "inferred": {
+      "sample_count": 0,
+      "last_observation_at": null,
+      "rolling": {}
+    }
+  },
+  "stack": {
+    "language": [],
+    "runtime": [],
+    "frontend": [],
+    "ui": [],
+    "backend_framework": [],
+    "database": [],
+    "orm": [],
+    "auth": [],
+    "deploy": [],
+    "testing": [],
+    "declared_at": null
+  },
+  "custom_skills": []
+}

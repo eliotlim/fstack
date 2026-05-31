@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# fstack install: wires fstack skills into ~/.claude/skills/
+#
+# Usage:
+#   ./install                 # interactive: asks dev vs prod
+#   ./install --dev           # symlink each skill into ~/.claude/skills/<name>/
+#   ./install --prod          # copy each skill into ~/.claude/skills/<name>/
+#   ./install --uninstall     # remove installed skills (reads config.json)
+#   ./install --status        # show current install state
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARGET_DIR="${FSTACK_INSTALL_DIR:-$HOME/.claude/skills}"
+FSTACK_DIR="${FSTACK_HOME:-$HOME/.fstack}"
+CONFIG_BIN="$REPO_DIR/bin/fstack-config"
+
+# Skills shipped with fstack. keep in sync with the directory structure.
+SKILLS=(
+  fstack
+  fstack-profile
+  fstack-stack
+  fstack-skill
+  fstack-scaffold
+  fstack-api
+  fstack-schema
+)
+
+_log() { printf '[fstack-install] %s\n' "$*"; }
+_warn() { printf '[fstack-install] WARN: %s\n' "$*" >&2; }
+_err() { printf '[fstack-install] ERROR: %s\n' "$*" >&2; }
+
+_require_jq() {
+  command -v jq >/dev/null 2>&1 || { _err "jq is required (brew install jq)"; exit 1; }
+}
+
+_init_config_if_missing() {
+  if ! "$CONFIG_BIN" exists; then
+    mkdir -p "$FSTACK_DIR"
+    "$CONFIG_BIN" init "$REPO_DIR" >/dev/null
+    _log "initialized $("$CONFIG_BIN" path)"
+  fi
+}
+
+_set_install_meta() {
+  local mode="$1"
+  _init_config_if_missing
+  "$CONFIG_BIN" set install.mode "$mode"
+  "$CONFIG_BIN" set install.install_path "$TARGET_DIR"
+  "$CONFIG_BIN" set install.source_path "$REPO_DIR"
+  "$CONFIG_BIN" set install.installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local installed_json
+  installed_json="$(printf '%s\n' "${SKILLS[@]}" | jq -R . | jq -s .)"
+  "$CONFIG_BIN" set-json install.installed_skills "$installed_json"
+}
+
+_install_one_dev() {
+  local skill="$1"
+  local src="$REPO_DIR/$skill"
+  local dest="$TARGET_DIR/$skill"
+  if [ ! -f "$src/SKILL.md" ]; then
+    _warn "missing source: $src/SKILL.md (skipping)"
+    return 0
+  fi
+  mkdir -p "$dest"
+  # Symlink only SKILL.md so other tooling owns its dir entries
+  if [ -e "$dest/SKILL.md" ] || [ -L "$dest/SKILL.md" ]; then
+    rm -f "$dest/SKILL.md"
+  fi
+  ln -s "$src/SKILL.md" "$dest/SKILL.md"
+  _log "linked /$skill -> $src/SKILL.md"
+}
+
+_install_one_prod() {
+  local skill="$1"
+  local src="$REPO_DIR/$skill"
+  local dest="$TARGET_DIR/$skill"
+  if [ ! -f "$src/SKILL.md" ]; then
+    _warn "missing source: $src/SKILL.md (skipping)"
+    return 0
+  fi
+  mkdir -p "$dest"
+  cp "$src/SKILL.md" "$dest/SKILL.md"
+  _log "copied /$skill"
+}
+
+_uninstall_one() {
+  local skill="$1"
+  local dest="$TARGET_DIR/$skill"
+  if [ -L "$dest/SKILL.md" ] || [ -f "$dest/SKILL.md" ]; then
+    rm -f "$dest/SKILL.md"
+    rmdir "$dest" 2>/dev/null || true
+    _log "removed /$skill"
+  fi
+}
+
+_install_mode() {
+  local mode="$1"
+  _require_jq
+  mkdir -p "$TARGET_DIR"
+  for s in "${SKILLS[@]}"; do
+    if [ "$mode" = "dev" ]; then _install_one_dev "$s"; else _install_one_prod "$s"; fi
+  done
+  _set_install_meta "$mode"
+  _log "done. install mode: $mode"
+  _log "config: $("$CONFIG_BIN" path)"
+  _log "next: open a new Claude Code session and type /fstack"
+}
+
+_status() {
+  _require_jq
+  if ! "$CONFIG_BIN" exists; then
+    _log "not installed"
+    return
+  fi
+  _log "config: $("$CONFIG_BIN" path)"
+  jq -r '.install | "mode: \(.mode)\ninstall_path: \(.install_path)\nsource_path: \(.source_path)\ninstalled_at: \(.installed_at)\nskills: \(.installed_skills | join(", "))"' "$("$CONFIG_BIN" path)"
+}
+
+mode=""
+case "${1:-}" in
+  --dev) mode="dev";;
+  --prod) mode="prod";;
+  --uninstall)
+    _require_jq
+    prev=()
+    if "$CONFIG_BIN" exists; then
+      while IFS= read -r line; do prev+=("$line"); done < <(jq -r '.install.installed_skills[]?' "$("$CONFIG_BIN" path)")
+    fi
+    if [ "${#prev[@]}" -gt 0 ]; then
+      for s in "${prev[@]}"; do _uninstall_one "$s"; done
+    else
+      for s in "${SKILLS[@]}"; do _uninstall_one "$s"; done
+    fi
+    _log "uninstalled (config preserved at $FSTACK_DIR)"
+    exit 0
+    ;;
+  --status) _status; exit 0;;
+  ""|--help|-h)
+    if [ "${1:-}" = "" ]; then
+      printf '\nfstack installer\n\n'
+      printf '  dev:  symlink repo SKILL.md files into ~/.claude/skills/<name>/.\n'
+      printf '        edit source, changes pick up next session.\n'
+      printf '  prod: copy SKILL.md files into ~/.claude/skills/<name>/.\n'
+      printf '        source repo can be deleted afterward.\n\n'
+      printf 'Pick a mode: [d]ev / [p]rod / [c]ancel: '
+      read -r ans
+      case "$ans" in
+        d|D|dev) mode="dev";;
+        p|P|prod) mode="prod";;
+        *) _log "cancelled"; exit 0;;
+      esac
+    else
+      sed -n '2,10p' "$0"
+      exit 0
+    fi
+    ;;
+  *)
+    _err "unknown flag: $1"
+    exit 2
+    ;;
+esac
+
+_install_mode "$mode"
