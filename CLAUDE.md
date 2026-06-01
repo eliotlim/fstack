@@ -6,10 +6,10 @@ For an AI working *on* fstack source, not for users.
 
 Lightweight skill framework for full-stack product engineers. Built on Claude Code skills.
 
-- Profile-driven recommendations. 5 numeric dimensions, tech stack, code preferences.
-- **Multiple subprofiles.** Users have modes (prod, prototype, learning). Each carries its own dimensions, stack, preferences, observations.
-- Implicit observation + explicit declaration. Reconcile per subprofile.
-- Tight surface. Seven skills. Don't sprawl.
+- Profile-driven recommendations. 5 numeric dimensions + tech stack + code preferences.
+- **Implicit multi-mode.** Observations cluster by (repo, hour-band). Each cluster is a subprofile fstack recognizes. Auto-switches on `/fstack` invocation when context matches a cluster.
+- Explicit mode is opt-in: user creates named manual subprofiles or pins one.
+- Tight surface. Seven skills.
 - No bun, no node. Bash + jq.
 
 Pairs with [gstack](https://github.com/). No shared state.
@@ -20,16 +20,17 @@ Pairs with [gstack](https://github.com/). No shared state.
 /Users/eliot/Workspaces/fstack/
 ├── README.md           # users
 ├── CLAUDE.md           # this
-├── VERSION             # 0.2.0
+├── VERSION             # 0.3.0
 ├── LICENSE
 ├── install             # dev / prod installer
 ├── config.template.json
 ├── bin/
 │   ├── fstack-config   # get/set + get-active/set-active + migrate
-│   ├── fstack-profile  # multi-subprofile management
-│   └── fstack-observe  # per-subprofile signal log
-├── fstack/             # /fstack: router + setup
-├── fstack-profile/
+│   ├── fstack-profile  # subprofile management
+│   ├── fstack-observe  # signal log + context capture
+│   └── fstack-cluster  # cluster observations into inferred subprofiles
+├── fstack/             # /fstack: router, auto-cluster, auto-switch, setup
+├── fstack-profile/     # show / edit / pin / unpin / list / use / create / cluster
 ├── fstack-stack/
 ├── fstack-skill/
 ├── fstack-scaffold/
@@ -37,32 +38,37 @@ Pairs with [gstack](https://github.com/). No shared state.
 └── fstack-schema/
 ```
 
-Each skill is one `SKILL.md`. Frontmatter: `name`, `version`, `description`, `allowed-tools`, `triggers`.
-
 ## State
 
 `~/.fstack/`:
 
-- `config.json`: main config (versioned, subprofile-shaped).
-- `observations/<subprofile-key>.jsonl`: append-only signal log per subprofile.
-- `skills/<name>/SKILL.md`: user-created custom skills (top-level, shared across subprofiles).
+- `config.json`: versioned, subprofiled.
+- `observations/sessions.jsonl`: append-only signal log (single file, all observations across all subprofiles).
+- `observations/_legacy/`: per-subprofile logs from v0.2 (untouched, kept for safety).
+- `skills/<name>/SKILL.md`: user-created custom skills.
 
-## Schema (v0.2.0)
+## Schema (v0.3.0)
 
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "install": { ... },
   "profile": {
     "active": "<key>",
+    "pinned": "<key>|null",
+    "auto_switch": true,
+    "last_cluster_at": "...",
     "subprofiles": {
       "<key>": {
         "label": "...",
         "description": "...|null",
+        "origin": "manual|inferred",
         "developer":   { "risk_tolerance": 0..1|null, "...": "..." },
         "preferences": { "code_style": "...|null", "...": "..." },
         "stack":       { "language": [], "...": [], "declared_at": "...|null" },
-        "inferred":    { "sample_count": N, "rolling": {}, "last_observation_at": "..." },
+        "inferred":    { "sample_count": N, "rolling": {} },
+        "examples":    [],
+        "cluster_meta": { "repo": "...", "hour_band": "morning|afternoon|evening|late-night" } | null,
         "declared_at": "...|null",
         "created_at":  "...",
         "last_used_at": "..."
@@ -73,83 +79,127 @@ Each skill is one `SKILL.md`. Frontmatter: `name`, `version`, `description`, `al
 }
 ```
 
+## Observation schema
+
+```json
+{
+  "ts": "...",
+  "profile_at_log": "<active subprofile when logged>",
+  "skill": "fstack-scaffold|fstack-api|fstack-schema|...",
+  "dimension": "risk_tolerance|bias_for_action|scope_appetite|test_rigor|architecture_care|null",
+  "signal": 0.0..1.0|null,
+  "weight": 1,
+  "annotation": "short human-readable text",
+  "context_note": "(legacy free-form context, deprecated, prefer annotation)",
+  "context": {
+    "repo": "<git toplevel basename>|null",
+    "branch": "<git current branch>|null",
+    "cwd": "<process cwd>",
+    "hour": 0..23,
+    "weekday": 1..7
+  }
+}
+```
+
+`annotate` entries set `dimension: null, signal: null, weight: 0` — they exist for cluster examples only.
+
+## Clustering
+
+`fstack-cluster cluster` groups `sessions.jsonl` entries by `(context.repo, context.hour | band)` where band is `late-night | morning | afternoon | evening`. Clusters crossing `--threshold N` (default 3) become inferred subprofiles. Each gets:
+
+- `developer.*`: weighted means of signals for known dimensions, others stay null.
+- `inferred.rolling`: same as developer.
+- `examples`: up to 3 unique annotations.
+- `cluster_meta`: { repo, hour_band, last_clustered_at }.
+
+Existing manual subprofiles are skipped — never overwritten by clustering. Existing inferred ones get updated in place (same key = `<repo>-<band>`).
+
+`fstack-cluster match --repo X --hour H` returns the best subprofile key. Prefers exact (repo, band) match, then (repo, any band), then empty.
+
+Auto-cluster trigger lives in `/fstack` preamble:
+
+- Only if `observations >= 5`.
+- Only if `last_cluster_at` is null OR older than 24h.
+
+Auto-switch trigger:
+
+- Only if `auto_switch == true`.
+- Only if `pinned == null`.
+- Only if `match` returns a non-empty key different from `active`.
+
 ## Conventions
 
 1. **No bun, no node.** Bash + jq.
-2. **Skills are stateless.** All durable state goes through `fstack-config` / `fstack-observe`. Don't write `config.json` from a skill body; go through the binary so writes stay atomic.
-3. **Skills target the active subprofile by default.** Use `get-active` / `set-active` / `set-active-json`. Hardcode a subprofile key only when explicitly inspecting another.
-4. **Preambles stay tight.** No telemetry, no upgrade checks, no MCP probing.
-5. **Confirm before writing declared values.** Free-form input + direct mutation is a trust boundary.
-6. **Stable bin path.** Skills resolve `_FSTACK_BIN` by following the SKILL.md symlink (dev) or falling back to common paths.
+2. **Skills are stateless.** Durable state through `fstack-config` / `fstack-observe` / `fstack-cluster`. Don't write `config.json` directly.
+3. **Skills target active by default.** Use `get-active` / `set-active`. Specify a key only when explicitly inspecting another.
+4. **Annotations matter.** Domain skills log a short human-readable annotation per turn. Without annotations, inferred clusters have no examples — they're abstract numbers.
+5. **Preambles stay tight.** No telemetry, no upgrade checks, no MCP probing.
+6. **Confirm before writing declared values.** Free-form input + direct mutation is a trust boundary.
+7. **Stable bin path.** Skills resolve `_FSTACK_BIN` by following the SKILL.md symlink (dev) or falling back to common paths.
 
-## Active subprofile, the rule
+## When to write into which
 
-Reads + writes default to `profile.subprofiles[profile.active]`. Skills:
+| Action | Destination |
+|--------|-------------|
+| User declared a value via UI | `set-active developer.<dim>` / `set-active preferences.<key>` |
+| Domain skill logging a choice | `fstack-observe log <dim> <sig> --annotation "..."` |
+| Sub-skill emitting a contextual note (no signal) | `fstack-observe annotate "..."` |
+| New manual subprofile | `fstack-profile create <key>` |
+| Clustering output | (automatic, do not touch from skills) |
 
-- `fstack-config get-active developer.risk_tolerance` → reads from active
-- `fstack-config set-active developer.risk_tolerance 0.8` → writes to active
-- `fstack-config set-active-json stack.language '["TypeScript"]'` → writes JSON to active
-- `fstack-profile vibe` → vibe of active
-- `fstack-profile vibe acme-prod` → vibe of a specific subprofile
-- `fstack-observe log <dim> <sig>` → logs to `observations/<active>.jsonl`
-- `fstack-observe rollup --profile <key>` → rollup a specific subprofile
-
-When the user's message implies a non-active subprofile ("for prod I'm careful"), don't silently write to active. Either offer to switch, or ask which subprofile to write to.
-
-## Add a skill
-
-1. Create `<skill-name>/SKILL.md` with frontmatter.
-2. Add `<skill-name>` to `SKILLS` in `install`.
-3. Run `./install --dev` again.
-4. Update README's skill table.
-
-## Add a profile dimension
-
-1. Update `config.template.json` under `profile.subprofiles.default.developer` and the migration jq in `fstack-config _maybe_migrate`.
-2. Update `fstack-profile show`, `dimensions`, `vibe`.
-3. Update `fstack-observe gap`.
-4. Update `/fstack` setup question.
-5. Update `/fstack-profile` mappings.
-6. Bump VERSION.
-
-## Migration policy
-
-`fstack-config _maybe_migrate` runs on every read after `exists`. Idempotent. v0.1 → v0.2 wraps old flat shape into `default` subprofile and relocates the old `observations.jsonl`. Future migrations follow the same pattern: detect on read, rewrite atomically, log to stderr.
-
-## Don't
-
-- Don't add a CLI entry point. fstack is invoked via `/fstack`.
-- Don't add telemetry, analytics, or phone-home. Local-first.
-- Don't depend on gstack. Compatible, not coupled.
-- Don't pass ~7 skills in v1. Prove the loop, then expand.
-- Don't add cross-subprofile bleed (observations from one subprofile shouldn't change another's `inferred`).
-- Don't add comments to skill bodies explaining what each step does. The skill IS instructions for Claude.
-
-## Voice
+## Voice (for fstack itself)
 
 Skills are instructions for Claude. Read like a senior eng leaving notes for another senior eng.
 
 - Short. Direct. Numbered lists for steps.
 - No em dashes. No AI vocab.
 - Imperatives: "Read X. Write Y." not "Your job is to read X."
-- Tables for mappings. Bullets for parallel. Numbers for sequence.
+- When auto-switching subprofile, say so in one line, don't apologize, don't ask.
+
+## Migration policy
+
+`_maybe_migrate` runs on every read after `exists`. Each version step is idempotent and additive — no destructive changes to fields that exist.
+
+Order:
+
+1. `_migrate_v02`: wrap flat profile into subprofiles. Detect by `profile.subprofiles == null`.
+2. `_migrate_v03`: add pinned/auto_switch/origin/examples/cluster_meta. Detect by `profile.auto_switch == null`. Consolidate per-subprofile observation logs.
+
+Future steps follow the same pattern.
 
 ## Smoke test
 
 ```bash
-./install --dev
 B=/Users/eliot/Workspaces/fstack/bin
-$B/fstack-config migrate
-$B/fstack-profile list
-$B/fstack-profile create test --label "Test" --clone-from default
-$B/fstack-profile use test
-$B/fstack-config set-active developer.risk_tolerance 0.2
-$B/fstack-profile vibe                   # should differ from default
-$B/fstack-observe log scope_appetite 0.7 --skill test --context smoke
-$B/fstack-observe rollup
-$B/fstack-observe gap
-$B/fstack-profile use default
-$B/fstack-profile remove test
+
+# Seed synthetic observations across two contexts
+mkdir -p ~/.fstack/observations
+cat > ~/.fstack/observations/sessions.jsonl <<'EOF'
+{"ts":"2026-05-25T14:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"architecture_care","signal":0.85,"weight":1,"annotation":"API with strict schema","context":{"repo":"acme","hour":14}}
+{"ts":"2026-05-25T15:00:00Z","profile_at_log":"default","skill":"fstack-schema","dimension":"test_rigor","signal":0.8,"weight":1,"annotation":"Migration with FK","context":{"repo":"acme","hour":15}}
+{"ts":"2026-05-25T16:00:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"scope_appetite","signal":0.3,"weight":1,"annotation":"Smaller scaffold","context":{"repo":"acme","hour":16}}
+{"ts":"2026-05-28T23:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"risk_tolerance","signal":0.9,"weight":1,"annotation":"Quick endpoint, no validation","context":{"repo":"side","hour":23}}
+{"ts":"2026-05-29T01:00:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"test_rigor","signal":0.15,"weight":1,"annotation":"No tests, just see if it works","context":{"repo":"side","hour":1}}
+{"ts":"2026-05-29T01:30:00Z","profile_at_log":"default","skill":"fstack-schema","dimension":"architecture_care","signal":0.2,"weight":1,"annotation":"SQLite, denormalized","context":{"repo":"side","hour":1}}
+EOF
+
+$B/fstack-cluster cluster
+$B/fstack-profile list             # two inferred should appear
+$B/fstack-cluster match --repo acme --hour 14         # acme-afternoon
+$B/fstack-cluster match --repo side --hour 1          # side-late-night
+$B/fstack-profile pin acme-afternoon
+$B/fstack-profile list             # [pinned] shown
+$B/fstack-profile unpin
 ```
 
-Real test: invoke `/fstack` in a fresh session, walk setup, create a second subprofile.
+Real test: invoke `/fstack` in a fresh session in any git repo — preamble should announce active and switch if context matches a cluster.
+
+## Don't
+
+- Don't add a CLI entry point.
+- Don't add telemetry / phone-home.
+- Don't depend on gstack.
+- Don't grow beyond ~7 skills in v0.x.
+- Don't let clustering overwrite manual subprofiles.
+- Don't switch silently — always print the SWITCHED line.
+- Don't add comments to skill bodies explaining what each step does.

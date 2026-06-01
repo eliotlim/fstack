@@ -1,7 +1,7 @@
 ---
 name: fstack
-version: 0.2.0
-description: Full-stack engineer's companion. Router and setup entrypoint. Supports multiple subprofiles (one per project, mode, or context).
+version: 0.3.0
+description: Full-stack engineer's companion. Router and setup entrypoint. Auto-detects which mode you're in (work prod vs side project vs late-night) by clustering your observations.
 allowed-tools:
   - Bash
   - Read
@@ -14,13 +14,13 @@ triggers:
   - set up fstack
   - configure fstack
   - show my fstack profile
+  - which mode am I in
   - switch profile
-  - which profile am I in
 ---
 
 # /fstack
 
-Entrypoint. Setup if needed. Otherwise route or summarize.
+Entrypoint. Setup on first use. Otherwise: auto-detect mode, route, summarize.
 
 ## Preamble
 
@@ -37,18 +37,51 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   done
 fi
 echo "FSTACK_BIN: $_FSTACK_BIN"
+
 if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   echo "FSTACK_STATE: missing-bin"
 elif "$_FSTACK_BIN/fstack-config" exists; then
   "$_FSTACK_BIN/fstack-config" migrate >/dev/null 2>&1 || true
   echo "FSTACK_STATE: ready"
-  echo "FSTACK_VERSION: $("$_FSTACK_BIN/fstack-config" get version)"
+
+  # Auto-cluster if stale (older than 1 day) and there's enough new signal
+  _last="$("$_FSTACK_BIN/fstack-config" get profile.last_cluster_at)"
+  _obs="$("$_FSTACK_BIN/fstack-observe" path 2>/dev/null)"
+  _n_obs=0; [ -f "$_obs" ] && _n_obs="$(wc -l < "$_obs" | tr -d ' ')"
+  _do_cluster=no
+  if [ "$_n_obs" -ge 5 ]; then
+    if [ -z "$_last" ] || [ "$_last" = "null" ]; then
+      _do_cluster=yes
+    else
+      _last_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$_last" +%s 2>/dev/null || date -d "$_last" +%s 2>/dev/null || echo 0)
+      _now_epoch=$(date +%s)
+      _age_h=$(( (_now_epoch - _last_epoch) / 3600 ))
+      [ "$_age_h" -gt 24 ] && _do_cluster=yes
+    fi
+  fi
+  [ "$_do_cluster" = "yes" ] && "$_FSTACK_BIN/fstack-cluster" cluster >/dev/null 2>&1 || true
+
+  # Auto-switch if enabled and not pinned
+  _auto="$("$_FSTACK_BIN/fstack-config" get profile.auto_switch)"
+  _pinned="$("$_FSTACK_BIN/fstack-config" get profile.pinned)"
+  _active="$("$_FSTACK_BIN/fstack-config" active)"
+  echo "ACTIVE: $_active"
+  echo "AUTO_SWITCH: $_auto"
+  [ -n "$_pinned" ] && [ "$_pinned" != "null" ] && echo "PINNED: $_pinned"
+  if [ "$_auto" = "true" ] && { [ -z "$_pinned" ] || [ "$_pinned" = "null" ]; }; then
+    _match="$("$_FSTACK_BIN/fstack-cluster" match 2>/dev/null)"
+    if [ -n "$_match" ] && [ "$_match" != "$_active" ]; then
+      "$_FSTACK_BIN/fstack-profile" use "$_match" >/dev/null
+      echo "SWITCHED: $_active -> $_match (context match)"
+      _active="$_match"
+    fi
+  fi
+
   echo "INSTALL_MODE: $("$_FSTACK_BIN/fstack-config" get install.mode)"
-  echo "ACTIVE: $("$_FSTACK_BIN/fstack-config" active)"
   "$_FSTACK_BIN/fstack-profile" list | sed 's/^/  /'
   _declared="$("$_FSTACK_BIN/fstack-config" get-active declared_at)"
-  [ -z "$_declared" ] && echo "PROFILE: undeclared" || echo "PROFILE: declared"
-  echo "OBSERVATIONS: $("$_FSTACK_BIN/fstack-config" get-active inferred.sample_count)"
+  [ -z "$_declared" ] && echo "DECLARED: no" || echo "DECLARED: yes"
+  echo "OBSERVATIONS_TOTAL: $_n_obs"
 else
   echo "FSTACK_STATE: uninitialized"
 fi
@@ -57,15 +90,16 @@ fi
 ## Branch
 
 1. `missing-bin`. Tell the user fstack isn't on disk. Point at the installer. STOP.
-2. `uninitialized`. Tell them to run `./install --dev` from the repo root, then retry. STOP.
-3. `PROFILE: undeclared` and only one subprofile (`default`). Run **Setup**.
-4. Otherwise. Run **Route**.
+2. `uninitialized`. Run `./install --dev` from the repo root, then retry. STOP.
+3. `DECLARED: no` and only one subprofile (default). Run **Setup**.
+4. `SWITCHED:` line printed. Mention the switch in one short line, then route.
+5. Otherwise. **Route** or **Summarize**.
 
 ## Setup
 
 Setup writes into the **active** subprofile (always `default` on first run).
 
-Ask five questions via AskUserQuestion, one at a time. A=0.2, B=0.5, C=0.8.
+Five AskUserQuestion calls, one at a time. A=0.2, B=0.5, C=0.8.
 
 1. `risk_tolerance`. Check carefully / Balanced / Move fast.
 2. `bias_for_action`. Plan first / Balanced / Ship now.
@@ -73,7 +107,7 @@ Ask five questions via AskUserQuestion, one at a time. A=0.2, B=0.5, C=0.8.
 4. `test_rigor`. Happy path / Balanced / Full coverage.
 5. `architecture_care`. Ship now / Balanced / Design first.
 
-After each answer:
+After each:
 
 ```bash
 "$_FSTACK_BIN/fstack-config" set-active developer.<dim> <value>
@@ -86,26 +120,24 @@ After all five:
 "$_FSTACK_BIN/fstack-profile" vibe
 ```
 
-Then: "Declare your stack now? Takes a minute." Yes → invoke `/fstack-stack`.
+Then: "Declare your stack? Takes a minute." Yes → invoke `/fstack-stack`.
 
-Also mention: "You can split this into project- or mode-specific profiles later with `/fstack-profile create`."
+Also: "As you use fstack, observations get clustered into auto-detected modes (work vs side-project, day vs late-night). I'll switch to the right one based on context. Disable with `/fstack-profile unpin off`."
 
 ## Route
 
-Match intent. Invoke via Skill tool, don't paraphrase.
+Match intent. Invoke via Skill tool.
 
 | User wants | Route |
 |------------|-------|
-| see profile / vibe / nothing typed | inline summary below |
-| edit profile / change dimension | `/fstack-profile` |
-| list subprofiles / which am I in | `/fstack-profile` (list branch) |
-| switch / use a different profile | `/fstack-profile` (use branch) |
-| create a new subprofile / "for acme prod" | `/fstack-profile` (create branch) |
+| see profile / nothing typed | inline summary below |
+| edit dimension or preference | `/fstack-profile` |
+| list / switch / pin profile | `/fstack-profile` |
 | set stack / use X | `/fstack-stack` |
-| add a skill / codify a pattern | `/fstack-skill` |
-| scaffold / new feature / new route | `/fstack-scaffold` |
-| design an api / new endpoint | `/fstack-api` |
-| new table / migration / schema | `/fstack-schema` |
+| add a skill | `/fstack-skill` |
+| scaffold / new feature | `/fstack-scaffold` |
+| design an api / endpoint | `/fstack-api` |
+| new table / migration | `/fstack-schema` |
 | ambiguous | ask: profile, stack, custom skill, scaffold, api, or schema? |
 
 ## Inline summary
@@ -117,21 +149,22 @@ Match intent. Invoke via Skill tool, don't paraphrase.
 
 Then one line of next step:
 
-- Only `default` subprofile and active = bold + shipper → "You're a one-mode dev so far. `/fstack-profile create <name>` to add a careful prod mode."
-- Multiple subprofiles, stack empty on active → "Active is `<key>` but stack is empty. Run `/fstack-stack`."
-- 10+ observations on active and any gap ≥ 0.2 → "Drift on X. `/fstack-profile gap` for details."
+- Only `default` and few observations → "Just go build. I'll learn your modes as you go."
+- Multiple inferred subprofiles + just switched → "I switched you to `<key>` because you're in `<repo>` at this hour."
+- 20+ observations and no inferred subprofiles emerged → "Your sessions look uniform so far — no distinct modes yet."
+- Inferred subprofile active, ≥ 0.2 gap on any dim → "Your behavior in this mode is drifting from declared. `/fstack-profile gap`."
 - Otherwise → "Use `/fstack-scaffold`, `/fstack-api`, or `/fstack-schema`."
 
 ## Observation logging
 
-This skill doesn't log. Domain skills do. Exception: user states a clear behavioral preference here ("I always want full coverage") → log:
+This skill doesn't log dimension signals. It can drop an annotation if the user states a behavioral preference in chat:
 
 ```bash
-"$_FSTACK_BIN/fstack-observe" log <dim> <signal> --skill fstack --context "user explicit"
+"$_FSTACK_BIN/fstack-observe" annotate "User wants full coverage on all backend changes" --skill fstack
 ```
 
-Bar: would this nudge future suggestions? Yes → log. No → skip.
+Domain skills do the dimension logging.
 
 ## Voice
 
-Short. Direct. No throat-clearing. Numbered lists for steps.
+Short. Direct. When you auto-switch, say it in one line ("Switched to `<key>` because you're in `<repo>` after hours"). Don't apologize for switching; the user opted in by default.

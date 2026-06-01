@@ -151,12 +151,19 @@ Use the project's existing error shape. Don't invent new ones.
 
 ## 6. Log
 
+Annotations are short, concrete, and human-readable. They feed clustering.
+
 ```bash
 # validation: inline=0.2, extracted=0.5, schema+types=0.85
-"$_FSTACK_BIN/fstack-observe" log architecture_care <signal> --skill fstack-api --context "<pattern>"
-"$_FSTACK_BIN/fstack-observe" log test_rigor <signal> --skill fstack-api --context "<tests>"
-[ "$tests_dropped" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log test_rigor 0.2 --skill fstack-api --context "user dropped tests"
+"$_FSTACK_BIN/fstack-observe" log architecture_care <signal> --skill fstack-api \
+  --annotation "<METHOD> <path> in <style>, <validation kind>"
+"$_FSTACK_BIN/fstack-observe" log test_rigor <signal> --skill fstack-api \
+  --annotation "<test style>"
+[ "$tests_dropped" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log test_rigor 0.2 \
+  --skill fstack-api --annotation "User dropped tests on <path>"
 ```
+
+Good annotations: "POST /teams/invite in tRPC, separate schema + types", "Quick GET /me handler, no validation".
 
 ## 7. Report
 

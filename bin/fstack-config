@@ -38,10 +38,8 @@ _atomic_write() {
   mv "$tmp" "$path"
 }
 
-# Migrate v0.1.x configs (flat profile + top-level stack) to v0.2.x (subprofiles).
-# Idempotent: no-op if already migrated.
-_maybe_migrate() {
-  [ -f "$CONFIG_FILE" ] || return 0
+# v0.1 (flat) -> v0.2 (subprofiles wrap)
+_migrate_v02() {
   local needs
   needs="$(jq -r 'if .profile.subprofiles == null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
   [ "$needs" = "yes" ] || return 0
@@ -73,16 +71,78 @@ _maybe_migrate() {
   ' "$CONFIG_FILE")"
   _atomic_write "$CONFIG_FILE" "$migrated"
 
-  # Migrate the old flat observations log into observations/default.jsonl
   if [ -f "$CONFIG_DIR/observations.jsonl" ] && [ ! -d "$CONFIG_DIR/observations" ]; then
     mkdir -p "$CONFIG_DIR/observations"
     mv "$CONFIG_DIR/observations.jsonl" "$CONFIG_DIR/observations/default.jsonl"
   fi
-
-  echo "[fstack-config] migrated to v0.2.0 (created subprofile 'default')" >&2
+  echo "[fstack-config] migrated to v0.2.0 (default subprofile)" >&2
 }
 
-# Resolve the active subprofile key (after migration)
+# v0.2 -> v0.3 (implicit clustering scaffold)
+_migrate_v03() {
+  local needs
+  needs="$(jq -r 'if .profile.auto_switch == null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
+  [ "$needs" = "yes" ] || return 0
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local migrated
+  migrated="$(jq --arg now "$now" '
+    .version = "0.3.0"
+    | .profile.pinned = (.profile.pinned // null)
+    | .profile.auto_switch = (.profile.auto_switch // true)
+    | .profile.last_cluster_at = (.profile.last_cluster_at // null)
+    | .profile.subprofiles |= with_entries(
+        .value |=
+          (.origin = (.origin // "manual"))
+          + {examples: (.examples // [])}
+          + {cluster_meta: (.cluster_meta // null)}
+      )
+  ' "$CONFIG_FILE")"
+  _atomic_write "$CONFIG_FILE" "$migrated"
+
+  # Consolidate per-subprofile observation logs into sessions.jsonl
+  if [ -d "$CONFIG_DIR/observations" ] && [ ! -f "$CONFIG_DIR/observations/sessions.jsonl" ]; then
+    local tmp_sessions
+    tmp_sessions="$(mktemp)"
+    : > "$tmp_sessions"
+    for f in "$CONFIG_DIR"/observations/*.jsonl; do
+      [ -f "$f" ] || continue
+      local key
+      key="$(basename "$f" .jsonl)"
+      [ "$key" = "sessions" ] && continue
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        jq -c --arg p "$key" '
+          . + {
+            profile_at_log: ($p),
+            context: (if (.context | type) == "object" then .context else {} end),
+            context_note: (if (.context | type) == "string" then .context elif .context_note then .context_note else "" end),
+            annotation: (.annotation // "")
+          }
+        ' <<<"$line" >> "$tmp_sessions"
+      done < "$f"
+    done
+    if [ -s "$tmp_sessions" ]; then
+      mv "$tmp_sessions" "$CONFIG_DIR/observations/sessions.jsonl"
+      mkdir -p "$CONFIG_DIR/observations/_legacy"
+      for f in "$CONFIG_DIR"/observations/*.jsonl; do
+        bn="$(basename "$f")"
+        [ "$bn" = "sessions.jsonl" ] && continue
+        mv "$f" "$CONFIG_DIR/observations/_legacy/$bn"
+      done
+    else
+      rm -f "$tmp_sessions"
+    fi
+  fi
+  echo "[fstack-config] migrated to v0.3.0 (implicit clustering enabled)" >&2
+}
+
+_maybe_migrate() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  _migrate_v02
+  _migrate_v03
+}
+
 _active_key() {
   jq -r '.profile.active // "default"' "$CONFIG_FILE"
 }
@@ -91,12 +151,8 @@ cmd="${1:-}"
 shift || true
 
 case "$cmd" in
-  path)
-    echo "$CONFIG_FILE"
-    ;;
-  exists)
-    [ -f "$CONFIG_FILE" ]
-    ;;
+  path) echo "$CONFIG_FILE" ;;
+  exists) [ -f "$CONFIG_FILE" ] ;;
   init)
     _require_jq
     mkdir -p "$CONFIG_DIR"

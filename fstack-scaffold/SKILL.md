@@ -104,14 +104,23 @@ Run any safety check already wired (`tsc --noEmit`, `bun test`, `pytest -q`). Do
 
 ## 6. Log
 
+Annotations are short, concrete, and human-readable. They feed the clustering engine that auto-detects the user's modes. Write what was built and how.
+
 ```bash
 # files written: 1=0.2, 2-3=0.4, 4-6=0.6, 7+=0.8
-"$_FSTACK_BIN/fstack-observe" log scope_appetite <signal> --skill fstack-scaffold --context "<N files>"
+"$_FSTACK_BIN/fstack-observe" log scope_appetite <signal> --skill fstack-scaffold \
+  --annotation "Scaffolded <feature> at <path>, <N files> + <test-style>"
 # tests: none=0.2, smoke=0.5, full=0.85
-"$_FSTACK_BIN/fstack-observe" log test_rigor <signal> --skill fstack-scaffold --context "<tests>"
+"$_FSTACK_BIN/fstack-observe" log test_rigor <signal> --skill fstack-scaffold \
+  --annotation "<tests outcome>"
 # user shrank the plan
-[ "$user_shrank" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log scope_appetite 0.25 --skill fstack-scaffold --context "shrank"
+[ "$user_shrank" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log scope_appetite 0.25 \
+  --skill fstack-scaffold --annotation "User shrank scaffold plan"
 ```
+
+Good annotations: "Scaffolded teams page with smoke test", "Built admin route, no tests requested", "Quick prototype, single file".
+
+Bad annotations: "did the work", "logged signal", "scaffolding done".
 
 ## 7. Report
 

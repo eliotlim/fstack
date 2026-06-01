@@ -67,11 +67,47 @@ case "$cmd" in
   list)
     jq -r '
       .profile.active as $a
+      | .profile.pinned as $pin
       | .profile.subprofiles
       | to_entries
       | .[]
-      | (if .key == $a then "* " else "  " end) + "\(.key)  \(.value.label // .key)" + (if .value.description then " — \(.value.description)" else "" end)
+      | (if .key == $a then "* " else "  " end)
+        + "\(.key)"
+        + (if .value.origin == "inferred" then "  (inferred)" else "  (manual)" end)
+        + (if .key == $pin then "  [pinned]" else "" end)
+        + "  \(.value.label // .key)"
+        + (if .value.description then " — \(.value.description)" else "" end)
     ' "$CONFIG_FILE"
+    ;;
+
+  pin)
+    key="${1:-}"
+    if [ -z "$key" ]; then
+      # Pin current active
+      key="$(jq -r '.profile.active' "$CONFIG_FILE")"
+    fi
+    _assert_exists "$key"
+    new="$(jq --arg k "$key" '.profile.pinned = $k' "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
+    echo "pinned: $key (auto-switch disabled while pinned)"
+    ;;
+
+  unpin)
+    new="$(jq '.profile.pinned = null' "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
+    echo "unpinned"
+    ;;
+
+  cluster)
+    "$BIN_DIR/fstack-cluster" cluster "$@"
+    ;;
+
+  match)
+    "$BIN_DIR/fstack-cluster" match "$@"
+    ;;
+
+  status)
+    "$BIN_DIR/fstack-cluster" status
     ;;
 
   use)

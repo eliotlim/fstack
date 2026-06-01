@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
-# fstack-observe: log signals per active subprofile
+# fstack-observe: log signals about the current session
 #
-# Each observation is one JSON line in ~/.fstack/observations/<active>.jsonl:
-#   {"ts":"...","skill":"...","dimension":"...","signal":0..1,"weight":1,"context":"..."}
+# One JSONL stream at ~/.fstack/observations/sessions.jsonl. Each entry:
+#   {ts, profile_at_log, skill, dimension, signal, weight, annotation,
+#    context: {repo, branch, cwd, hour, weekday}}
 #
 # Usage:
-#   fstack-observe log <dim> <signal> [--weight N] [--skill X] [--context T]
-#   fstack-observe rollup [--profile <key>]
+#   fstack-observe log <dim> <signal> [--weight N] [--skill X]
+#                                     [--annotation "short text"]
+#                                     [--note "older key, still accepted"]
+#   fstack-observe annotate <text> [--skill X]  # text-only entry, no dimension
+#   fstack-observe rollup [--profile <key>]      # roll active or specific subprofile
 #   fstack-observe show [--limit N] [--profile <key>]
 #   fstack-observe gap [--profile <key>]
+#   fstack-observe path                          # prints sessions.jsonl path
 #
 # Dimensions: risk_tolerance, bias_for_action, scope_appetite, test_rigor, architecture_care.
-# Signal 0..1 where 0 = low (cautious / deliberate / lean), 1 = high.
+# Signal 0..1 where 0 = low (cautious / lean / happy-path), 1 = high.
 
 set -euo pipefail
 
@@ -22,22 +27,13 @@ CONFIG="$BIN_DIR/fstack-config"
 
 FSTACK_DIR="${FSTACK_HOME:-$HOME/.fstack}"
 LOG_DIR="$FSTACK_DIR/observations"
+SESSIONS="$LOG_DIR/sessions.jsonl"
 
 command -v jq >/dev/null 2>&1 || { echo "fstack-observe: jq is required" >&2; exit 1; }
 "$CONFIG" exists || { echo "fstack-observe: not initialized" >&2; exit 1; }
 "$CONFIG" migrate >/dev/null 2>&1 || true
 
 CONFIG_FILE="$("$CONFIG" path)"
-
-_resolve_key() {
-  local k="${1:-}"
-  if [ -z "$k" ]; then jq -r '.profile.active' "$CONFIG_FILE"; else echo "$k"; fi
-}
-
-_log_path() {
-  local k="$1"
-  echo "$LOG_DIR/$k.jsonl"
-}
 
 _atomic_write() {
   local path="$1" content="$2"
@@ -46,31 +42,79 @@ _atomic_write() {
   mv "$tmp" "$path"
 }
 
+_active() { jq -r '.profile.active' "$CONFIG_FILE"; }
+_resolve_key() { [ -z "${1:-}" ] && _active || echo "$1"; }
+
+# Capture context once per log call
+_context_json() {
+  local repo branch cwd hour weekday
+  repo="$(git rev-parse --show-toplevel 2>/dev/null | tr -d '\n' | awk -F/ '{print $NF}')"
+  branch="$(git branch --show-current 2>/dev/null || true)"
+  cwd="$PWD"
+  hour="$(date +%-H)"
+  weekday="$(date +%u)"
+  jq -nc \
+    --arg repo "$repo" --arg branch "$branch" --arg cwd "$cwd" \
+    --argjson hour "$hour" --argjson weekday "$weekday" \
+    '{
+      repo: (if $repo == "" then null else $repo end),
+      branch: (if $branch == "" then null else $branch end),
+      cwd: $cwd,
+      hour: $hour,
+      weekday: $weekday
+    }'
+}
+
 cmd="${1:-}"
 shift || true
 
 case "$cmd" in
+  path) echo "$SESSIONS" ;;
+
   log)
     dim="${1:-}"; signal="${2:-}"; shift 2 || true
-    [ -z "$dim" ] || [ -z "$signal" ] && { echo "usage: fstack-observe log <dim> <signal> [--weight N] [--skill X] [--context T]" >&2; exit 2; }
-    weight=1; skill=""; context=""
+    [ -z "$dim" ] || [ -z "$signal" ] && { echo "usage: fstack-observe log <dim> <signal> [--weight N] [--skill X] [--annotation T] [--note T]" >&2; exit 2; }
+    weight=1; skill=""; annotation=""; note=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --weight) weight="$2"; shift 2;;
         --skill) skill="$2"; shift 2;;
-        --context) context="$2"; shift 2;;
+        --annotation) annotation="$2"; shift 2;;
+        --note|--context) note="$2"; shift 2;;
         *) shift;;
       esac
     done
-    active="$(_resolve_key)"
+    active="$(_active)"
     mkdir -p "$LOG_DIR"
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ctx="$(_context_json)"
     jq -nc \
       --arg ts "$ts" --arg skill "$skill" --arg dim "$dim" \
-      --arg context "$context" --arg profile "$active" \
-      --argjson signal "$signal" --argjson weight "$weight" \
-      '{ts:$ts, profile:$profile, skill:$skill, dimension:$dim, signal:$signal, weight:$weight, context:$context}' \
-      >> "$(_log_path "$active")"
+      --arg note "$note" --arg annotation "$annotation" --arg profile "$active" \
+      --argjson signal "$signal" --argjson weight "$weight" --argjson ctx "$ctx" \
+      '{ts:$ts, profile_at_log:$profile, skill:$skill, dimension:$dim, signal:$signal, weight:$weight, annotation:$annotation, context_note:$note, context:$ctx}' \
+      >> "$SESSIONS"
+    ;;
+
+  annotate)
+    text="${1:-}"; shift || true
+    [ -z "$text" ] && { echo "usage: fstack-observe annotate <text> [--skill X]" >&2; exit 2; }
+    skill=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --skill) skill="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    active="$(_active)"
+    mkdir -p "$LOG_DIR"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    ctx="$(_context_json)"
+    jq -nc \
+      --arg ts "$ts" --arg skill "$skill" --arg annotation "$text" --arg profile "$active" \
+      --argjson ctx "$ctx" \
+      '{ts:$ts, profile_at_log:$profile, skill:$skill, dimension:null, signal:null, weight:0, annotation:$annotation, context_note:"", context:$ctx}' \
+      >> "$SESSIONS"
     ;;
 
   rollup)
@@ -82,25 +126,34 @@ case "$cmd" in
       esac
     done
     key="$(_resolve_key "$profile")"
-    log="$(_log_path "$key")"
-    [ -f "$log" ] || { echo "no observations for $key"; exit 0; }
-    rolling="$(jq -s '
+    [ -f "$SESSIONS" ] || { echo "no observations yet"; exit 0; }
+    # For a manual subprofile, filter sessions by profile_at_log.
+    # For inferred, prefer cluster_meta scope (repo + hour_band).
+    origin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].origin // "manual"' "$CONFIG_FILE")"
+    if [ "$origin" = "inferred" ]; then
+      repo="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.repo // ""' "$CONFIG_FILE")"
+      band="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.hour_band // ""' "$CONFIG_FILE")"
+      filter='def band: if . == null then "unknown" elif (. < 6 or . >= 22) then "late-night" elif . < 12 then "morning" elif . < 18 then "afternoon" else "evening" end;
+        [.[] | select(.dimension != null) | select((.context.repo // "unknown") == $repo and (.context.hour | band) == $band)]'
+      filtered="$(jq -s --arg repo "$repo" --arg band "$band" "$filter" "$SESSIONS")"
+    else
+      filtered="$(jq -s --arg k "$key" '[.[] | select(.profile_at_log == $k) | select(.dimension != null)]' "$SESSIONS")"
+    fi
+    count="$(jq 'length' <<<"$filtered")"
+    [ "$count" -eq 0 ] && { echo "[$key] no matching observations"; exit 0; }
+    rolling="$(jq '
       group_by(.dimension)
-      | map({
-          key: .[0].dimension,
-          value: ((map(.signal * .weight) | add) / (map(.weight) | add))
-        })
+      | map({key:.[0].dimension, value:((map(.signal*.weight)|add)/(map(.weight)|add))})
       | from_entries
-    ' "$log")"
-    sample_count="$(wc -l < "$log" | tr -d ' ')"
-    last_ts="$(tail -1 "$log" | jq -r '.ts')"
-    new="$(jq --arg k "$key" --argjson rolling "$rolling" --argjson count "$sample_count" --arg last "$last_ts" \
+    ' <<<"$filtered")"
+    last_ts="$(jq -r 'max_by(.ts) | .ts' <<<"$filtered")"
+    new="$(jq --arg k "$key" --argjson rolling "$rolling" --argjson count "$count" --arg last "$last_ts" \
       '.profile.subprofiles[$k].inferred.rolling = $rolling
        | .profile.subprofiles[$k].inferred.sample_count = $count
        | .profile.subprofiles[$k].inferred.last_observation_at = $last' \
       "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
-    echo "[$key] rolled up $sample_count observations across $(jq -r 'keys | length' <<<"$rolling") dimensions"
+    echo "[$key] rolled up $count observations across $(jq -r 'keys|length' <<<"$rolling") dimensions"
     ;;
 
   show)
@@ -112,10 +165,17 @@ case "$cmd" in
         *) shift;;
       esac
     done
-    key="$(_resolve_key "$profile")"
-    log="$(_log_path "$key")"
-    [ -f "$log" ] || { echo "no observations for $key"; exit 0; }
-    tail -n "$limit" "$log" | jq -r '"\(.ts)  \(.skill // "?")  \(.dimension)=\(.signal)  \(.context // "")"'
+    [ -f "$SESSIONS" ] || { echo "no observations yet"; exit 0; }
+    if [ -n "$profile" ]; then
+      key="$(_resolve_key "$profile")"
+      jq -c --arg k "$key" 'select(.profile_at_log == $k)' "$SESSIONS" | tail -n "$limit" | jq -r '
+        "\(.ts)  \(.skill // "?")  \(.dimension // "annotate")\(if .signal != null then "=\(.signal)" else "" end)  [\(.context.repo // "?")@\(.context.hour)h]  \(.annotation // .context_note // "")"
+      '
+    else
+      tail -n "$limit" "$SESSIONS" | jq -r '
+        "\(.ts)  \(.profile_at_log // "?")  \(.skill // "?")  \(.dimension // "annotate")\(if .signal != null then "=\(.signal)" else "" end)  [\(.context.repo // "?")@\(.context.hour)h]  \(.annotation // .context_note // "")"
+      '
+    fi
     ;;
 
   gap)
@@ -132,11 +192,11 @@ case "$cmd" in
       | $sp.developer as $d
       | ($sp.inferred.rolling // {}) as $r
       | [
-          ["risk_tolerance",     $d.risk_tolerance,     $r.risk_tolerance],
-          ["bias_for_action",    $d.bias_for_action,    $r.bias_for_action],
-          ["scope_appetite",     $d.scope_appetite,     $r.scope_appetite],
-          ["test_rigor",         $d.test_rigor,         $r.test_rigor],
-          ["architecture_care",  $d.architecture_care,  $r.architecture_care]
+          ["risk_tolerance", $d.risk_tolerance, $r.risk_tolerance],
+          ["bias_for_action", $d.bias_for_action, $r.bias_for_action],
+          ["scope_appetite", $d.scope_appetite, $r.scope_appetite],
+          ["test_rigor", $d.test_rigor, $r.test_rigor],
+          ["architecture_care", $d.architecture_care, $r.architecture_care]
         ]
       | .[]
       | select(.[1] != null and .[2] != null)
@@ -145,7 +205,7 @@ case "$cmd" in
     ;;
 
   ""|help|-h|--help)
-    sed -n '2,15p' "$0"
+    sed -n '2,20p' "$0"
     ;;
 
   *)

@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "install": {
     "mode": "dev",
     "install_path": "~/.claude/skills",
@@ -9,10 +9,14 @@
   },
   "profile": {
     "active": "default",
+    "pinned": null,
+    "auto_switch": true,
+    "last_cluster_at": null,
     "subprofiles": {
       "default": {
         "label": "default",
         "description": null,
+        "origin": "manual",
         "developer": {
           "risk_tolerance": null,
           "bias_for_action": null,
@@ -45,6 +49,8 @@
           "rolling": {},
           "last_observation_at": null
         },
+        "examples": [],
+        "cluster_meta": null,
         "declared_at": null,
         "created_at": null,
         "last_used_at": null

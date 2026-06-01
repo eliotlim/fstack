@@ -145,12 +145,20 @@ Grep for typed queries on the changed table. List them. Ask before updating.
 
 ## 7. Log
 
+Annotations are short, concrete, human-readable. They feed clustering.
+
 ```bash
-"$_FSTACK_BIN/fstack-observe" log architecture_care <signal> --skill fstack-schema --context "<choices>"
-"$_FSTACK_BIN/fstack-observe" log scope_appetite <signal> --skill fstack-schema --context "<extras>"
-[ "$reversible" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log risk_tolerance 0.25 --skill fstack-schema --context "reversible"
-[ "$reversible" = "no" ] && "$_FSTACK_BIN/fstack-observe" log risk_tolerance 0.75 --skill fstack-schema --context "one-way"
+"$_FSTACK_BIN/fstack-observe" log architecture_care <signal> --skill fstack-schema \
+  --annotation "<table> in <orm>: <constraint summary>"
+"$_FSTACK_BIN/fstack-observe" log scope_appetite <signal> --skill fstack-schema \
+  --annotation "<extras>"
+[ "$reversible" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log risk_tolerance 0.25 \
+  --skill fstack-schema --annotation "Reversible migration on <table>"
+[ "$reversible" = "no" ] && "$_FSTACK_BIN/fstack-observe" log risk_tolerance 0.75 \
+  --skill fstack-schema --annotation "One-way migration on <table>"
 ```
+
+Good annotations: "teams table in Drizzle: FK + ON DELETE CASCADE + slug index", "SQLite, one denormalized table".
 
 ## 8. Report
 

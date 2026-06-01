@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# fstack-cluster: derive inferred subprofiles from session observations.
+#
+# Groups observations by (repo, hour_band). Emits one inferred subprofile
+# per cluster that crosses the sample threshold. Manual subprofiles are
+# preserved untouched.
+#
+# Usage:
+#   fstack-cluster cluster [--threshold N] [--max-age-days N]
+#   fstack-cluster match [--repo R] [--hour H]   # prints best matching subprofile key
+#   fstack-cluster status                        # last cluster time, inferred count
+#
+# Hour bands: late-night (22..5), morning (6..11), afternoon (12..17), evening (18..21).
+
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
+BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
+CONFIG="$BIN_DIR/fstack-config"
+
+FSTACK_DIR="${FSTACK_HOME:-$HOME/.fstack}"
+SESSIONS="$FSTACK_DIR/observations/sessions.jsonl"
+
+command -v jq >/dev/null 2>&1 || { echo "fstack-cluster: jq is required" >&2; exit 1; }
+"$CONFIG" exists || { echo "fstack-cluster: not initialized" >&2; exit 1; }
+"$CONFIG" migrate >/dev/null 2>&1 || true
+CONFIG_FILE="$("$CONFIG" path)"
+
+_atomic_write() {
+  local path="$1" content="$2"
+  local tmp; tmp="$(mktemp "${path}.XXXXXX")"
+  printf '%s\n' "$content" > "$tmp"
+  mv "$tmp" "$path"
+}
+
+_band() {
+  local h="${1:-12}"
+  awk -v h="$h" 'BEGIN {
+    if (h < 6 || h >= 22) print "late-night"
+    else if (h < 12) print "morning"
+    else if (h < 18) print "afternoon"
+    else print "evening"
+  }'
+}
+
+cmd="${1:-cluster}"
+shift || true
+
+case "$cmd" in
+  cluster)
+    threshold=3
+    max_age_days=60
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --threshold) threshold="$2"; shift 2;;
+        --max-age-days) max_age_days="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    [ -f "$SESSIONS" ] || { echo "no observations yet"; exit 0; }
+
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cutoff_epoch=$(( $(date +%s) - max_age_days * 86400 ))
+
+    # Note: date math is platform-flaky in jq, so prefilter by ts string compare
+    # (ISO8601 is lexicographically sortable). Build cutoff in same format.
+    cutoff_ts="$(date -u -r "$cutoff_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$cutoff_epoch" +%Y-%m-%dT%H:%M:%SZ)"
+
+    clusters="$(jq -s --argjson th "$threshold" --arg cutoff "$cutoff_ts" '
+      def band: if . == null then "unknown" elif (. < 6 or . >= 22) then "late-night" elif . < 12 then "morning" elif . < 18 then "afternoon" else "evening" end;
+      def repo_of: (.context.repo // "unknown");
+      def keyfor: repo_of + "-" + (.context.hour | band);
+      map(select(.ts >= $cutoff))
+      | group_by(repo_of + ":" + (.context.hour | band))
+      | map({
+          key: (.[0] | keyfor),
+          repo: (.[0] | repo_of),
+          hour_band: (.[0].context.hour | band),
+          sample_count: length,
+          last_seen: (max_by(.ts) | .ts),
+          dimensions: (
+            map(select(.dimension != null))
+            | if length == 0 then {} else
+                group_by(.dimension)
+                | map({key:.[0].dimension, value:((map(.signal*.weight)|add)/(map(.weight)|add))})
+                | from_entries
+              end
+          ),
+          examples: (
+            map(.annotation // empty)
+            | map(select(. != null and . != ""))
+            | unique
+            | .[0:3]
+          )
+        })
+      | map(select(.sample_count >= $th))
+    ' "$SESSIONS")"
+
+    # Update config: write each cluster as an inferred subprofile, do NOT touch
+    # entries whose origin is "manual".
+    new="$(jq --argjson clusters "$clusters" --arg now "$now" '
+      def merge_inferred($c; $now):
+        {
+          label: (.label // $c.key),
+          description: ("inferred from " + ($c.sample_count|tostring) + " observations on " + $c.repo + " during " + $c.hour_band),
+          origin: "inferred",
+          developer: (
+            {risk_tolerance:null, bias_for_action:null, scope_appetite:null, test_rigor:null, architecture_care:null}
+            + ($c.dimensions | with_entries(select(.key | IN("risk_tolerance","bias_for_action","scope_appetite","test_rigor","architecture_care"))))
+          ),
+          preferences: (.preferences // {code_style:null, comment_level:null, abstraction:null, error_handling:null, type_safety:null}),
+          stack: (.stack // {language:[], runtime:[], frontend:[], ui:[], backend_framework:[], database:[], orm:[], auth:[], deploy:[], testing:[], declared_at:null}),
+          inferred: {sample_count: $c.sample_count, rolling: $c.dimensions, last_observation_at: $c.last_seen},
+          examples: $c.examples,
+          cluster_meta: {repo: $c.repo, hour_band: $c.hour_band, last_clustered_at: $now},
+          declared_at: null,
+          created_at: (.created_at // $now),
+          last_used_at: (.last_used_at // null)
+        };
+      .profile.last_cluster_at = $now
+      | reduce $clusters[] as $c (
+          .;
+          if (.profile.subprofiles[$c.key].origin // "inferred") == "manual"
+          then .
+          else .profile.subprofiles[$c.key] = ((.profile.subprofiles[$c.key] // {}) | merge_inferred($c; $now))
+          end
+        )
+    ' "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
+
+    n_inferred="$(jq -r '[.profile.subprofiles[] | select(.origin == "inferred")] | length' "$CONFIG_FILE")"
+    n_manual="$(jq -r '[.profile.subprofiles[] | select(.origin == "manual")] | length' "$CONFIG_FILE")"
+    echo "clustered: $n_inferred inferred, $n_manual manual"
+    ;;
+
+  match)
+    repo=""; hour=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo) repo="$2"; shift 2;;
+        --hour) hour="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    [ -z "$hour" ] && hour="$(date +%-H)"
+    if [ -z "$repo" ]; then
+      repo="$(git rev-parse --show-toplevel 2>/dev/null | tr -d '\n' | awk -F/ '{print $NF}')"
+      [ -z "$repo" ] && repo="unknown"
+    fi
+    band="$(_band "$hour")"
+
+    # Prefer exact (repo, band) match, then (repo, *), then unset
+    jq -r --arg repo "$repo" --arg band "$band" '
+      [
+        # exact match
+        (.profile.subprofiles | to_entries[]
+          | select(.value.cluster_meta != null)
+          | select(.value.cluster_meta.repo == $repo and .value.cluster_meta.hour_band == $band)
+          | .key),
+        # repo match, any band
+        (.profile.subprofiles | to_entries[]
+          | select(.value.cluster_meta != null)
+          | select(.value.cluster_meta.repo == $repo)
+          | .key)
+      ]
+      | first // empty
+    ' "$CONFIG_FILE"
+    ;;
+
+  status)
+    last="$(jq -r '.profile.last_cluster_at // "never"' "$CONFIG_FILE")"
+    pinned="$(jq -r '.profile.pinned // "none"' "$CONFIG_FILE")"
+    auto="$(jq -r '.profile.auto_switch' "$CONFIG_FILE")"
+    n_inf="$(jq -r '[.profile.subprofiles[] | select(.origin == "inferred")] | length' "$CONFIG_FILE")"
+    n_man="$(jq -r '[.profile.subprofiles[] | select(.origin == "manual")] | length' "$CONFIG_FILE")"
+    n_obs=0
+    [ -f "$SESSIONS" ] && n_obs="$(wc -l < "$SESSIONS" | tr -d ' ')"
+    echo "auto_switch: $auto"
+    echo "pinned: $pinned"
+    echo "last_cluster_at: $last"
+    echo "observations: $n_obs"
+    echo "inferred: $n_inf"
+    echo "manual: $n_man"
+    ;;
+
+  *)
+    echo "fstack-cluster: unknown command '$cmd'" >&2
+    exit 2
+    ;;
+esac
