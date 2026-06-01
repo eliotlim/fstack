@@ -1,7 +1,7 @@
 ---
 name: fstack-stack
-version: 0.1.0
-description: Declare and inspect the user's tech stack preferences. Other fstack skills read this to shape recommendations.
+version: 0.2.0
+description: Declare the tech stack for the active subprofile. Different modes can hold different stacks (acme-prod = Postgres/Prisma, late-night = SQLite/Drizzle).
 allowed-tools:
   - Bash
   - Read
@@ -13,11 +13,12 @@ triggers:
   - tech stack
   - use postgres
   - use clerk
+  - this project uses X
 ---
 
 # /fstack-stack
 
-Stack lives at `stack.*`. Each category is an array.
+Stack lives at `stack.*` of the **active subprofile**. Each category is an array. Switch profiles via `/fstack-profile use <key>` before declaring a different mode's stack.
 
 | Key | Common values |
 |-----|---------------|
@@ -44,7 +45,10 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
+echo "ACTIVE: $("$_FSTACK_BIN/fstack-config" active)"
 ```
+
+State the active subprofile up front. If the user's intent reads like a different mode ("for prod I use X"), offer to switch or create first.
 
 ## Branch
 
@@ -52,7 +56,7 @@ fi
 2. set (replace category)
 3. add to category
 4. remove from category
-5. full setup (all categories empty and no `declared_at`)
+5. full setup (all categories empty on active and no `stack.declared_at`)
 
 ## 1. Show
 
@@ -60,61 +64,61 @@ fi
 "$_FSTACK_BIN/fstack-profile" stack
 ```
 
-Empty? "No stack declared. Run `/fstack-stack`, or just tell me what you use."
+Empty? "No stack on `$ACTIVE`. Run `/fstack-stack`, or tell me what you use."
 
 ## 2. Set
 
 ```bash
-"$_FSTACK_BIN/fstack-config" set-json stack.<category> '["<value>"]'
-"$_FSTACK_BIN/fstack-config" set stack.declared_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"$_FSTACK_BIN/fstack-config" set-active-json stack.<category> '["<value>"]'
+"$_FSTACK_BIN/fstack-config" set-active stack.declared_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-Confirm in one line. "Frontend → Svelte."
+Confirm in one line. "Frontend → Svelte (on `$ACTIVE`)."
 
 ## 3. Add
 
 ```bash
-_current="$("$_FSTACK_BIN/fstack-config" get stack.<category>)"
+_current="$("$_FSTACK_BIN/fstack-config" get-active stack.<category>)"
 [ -z "$_current" ] && _current='[]'
 _new="$(jq -c --arg v "<value>" '. + [$v] | unique' <<<"$_current")"
-"$_FSTACK_BIN/fstack-config" set-json stack.<category> "$_new"
+"$_FSTACK_BIN/fstack-config" set-active-json stack.<category> "$_new"
 ```
 
 ## 4. Remove
 
 ```bash
-_current="$("$_FSTACK_BIN/fstack-config" get stack.<category>)"
+_current="$("$_FSTACK_BIN/fstack-config" get-active stack.<category>)"
 _new="$(jq -c --arg v "<value>" '. - [$v]' <<<"$_current")"
-"$_FSTACK_BIN/fstack-config" set-json stack.<category> "$_new"
+"$_FSTACK_BIN/fstack-config" set-active-json stack.<category> "$_new"
 ```
 
 ## 5. Full setup
 
-Walk 10 categories via AskUserQuestion. 3-4 picks each. AskUserQuestion adds Other automatically.
+Walk 10 categories via AskUserQuestion. 3-4 picks each.
 
-Tilt recommendations to the declared profile:
+Tilt recommendations from the active subprofile's declared dimensions:
 
 - `bias_for_action ≥ 0.65`: batteries-included (Next.js, Vercel, Clerk, Drizzle).
-- `architecture_care ≥ 0.65`: explicit and typed (Hono + Kysely, Fastify + raw, Drizzle over Prisma).
+- `architecture_care ≥ 0.65`: explicit + typed (Hono + Kysely, Fastify + raw, Drizzle over Prisma).
 - `risk_tolerance ≤ 0.35`: boring (Postgres, Node, React).
-- `risk_tolerance ≥ 0.65`: newer is fair game (Bun, Effect, latest frameworks).
+- `risk_tolerance ≥ 0.65`: newer fair game (Bun, Effect, latest frameworks).
 
 After each pick:
 
 ```bash
-"$_FSTACK_BIN/fstack-config" set-json stack.<category> "$(jq -c --arg v "<value>" '[$v]')"
+"$_FSTACK_BIN/fstack-config" set-active-json stack.<category> "$(jq -c --arg v "<value>" '[$v]')"
 ```
 
 After all 10:
 
 ```bash
-"$_FSTACK_BIN/fstack-config" set stack.declared_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+"$_FSTACK_BIN/fstack-config" set-active stack.declared_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$_FSTACK_BIN/fstack-profile" stack
 ```
 
 ## Observation
 
-User picked Other = strong opinion. Tiny bias_for_action nudge:
+User picked Other = strong opinion. Small `bias_for_action` nudge on active:
 
 ```bash
 "$_FSTACK_BIN/fstack-observe" log bias_for_action 0.6 --weight 1 --skill fstack-stack --context "Other for <category>"
@@ -122,4 +126,4 @@ User picked Other = strong opinion. Tiny bias_for_action nudge:
 
 ## Voice
 
-Categories are nudges. Custom picks land without protest. No tradeoff lectures unless asked.
+Always print which subprofile you're writing to. The user has multiple modes; ambiguity is the failure mode.

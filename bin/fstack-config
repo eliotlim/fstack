@@ -4,11 +4,16 @@
 # Usage:
 #   fstack-config get <dot.path>            # prints value (empty if missing)
 #   fstack-config set <dot.path> <value>    # writes value (auto-detects type)
-#   fstack-config set-json <dot.path> <json>  # writes raw JSON value
+#   fstack-config set-json <dot.path> <json>
+#   fstack-config get-active <subpath>      # reads from active subprofile
+#   fstack-config set-active <subpath> <value>
+#   fstack-config set-active-json <subpath> <json>
+#   fstack-config active                    # prints the active subprofile key
 #   fstack-config exists                    # exit 0 if config file exists
 #   fstack-config path                      # prints config file path
 #   fstack-config init [source_path]        # creates config from template
 #   fstack-config show                      # prints full config
+#   fstack-config migrate                   # force migration check
 
 set -euo pipefail
 
@@ -16,21 +21,13 @@ CONFIG_DIR="${FSTACK_HOME:-$HOME/.fstack}"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 TEMPLATE_FILE=""
 
-# Locate the template by walking up from this script
 _self="${BASH_SOURCE[0]}"
-while [ -L "$_self" ]; do
-  _self="$(readlink "$_self")"
-done
+while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
 _script_dir="$(cd "$(dirname "$_self")" && pwd)"
-if [ -f "$_script_dir/../config.template.json" ]; then
-  TEMPLATE_FILE="$(cd "$_script_dir/.." && pwd)/config.template.json"
-fi
+[ -f "$_script_dir/../config.template.json" ] && TEMPLATE_FILE="$(cd "$_script_dir/.." && pwd)/config.template.json"
 
 _require_jq() {
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "fstack-config: jq is required (brew install jq)" >&2
-    exit 1
-  fi
+  command -v jq >/dev/null 2>&1 || { echo "fstack-config: jq is required (brew install jq)" >&2; exit 1; }
 }
 
 _atomic_write() {
@@ -39,6 +36,55 @@ _atomic_write() {
   tmp="$(mktemp "${path}.XXXXXX")"
   printf '%s\n' "$content" > "$tmp"
   mv "$tmp" "$path"
+}
+
+# Migrate v0.1.x configs (flat profile + top-level stack) to v0.2.x (subprofiles).
+# Idempotent: no-op if already migrated.
+_maybe_migrate() {
+  [ -f "$CONFIG_FILE" ] || return 0
+  local needs
+  needs="$(jq -r 'if .profile.subprofiles == null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
+  [ "$needs" = "yes" ] || return 0
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local migrated
+  migrated="$(jq --arg now "$now" '
+    {
+      version: "0.2.0",
+      install: (.install // {}),
+      profile: {
+        active: "default",
+        subprofiles: {
+          "default": {
+            label: "default",
+            description: null,
+            developer:   (.profile.developer   // {risk_tolerance:null, bias_for_action:null, scope_appetite:null, test_rigor:null, architecture_care:null}),
+            preferences: (.profile.preferences // {code_style:null, comment_level:null, abstraction:null, error_handling:null, type_safety:null}),
+            stack:       (.stack // {language:[], runtime:[], frontend:[], ui:[], backend_framework:[], database:[], orm:[], auth:[], deploy:[], testing:[], declared_at:null}),
+            inferred:    (.profile.inferred // {sample_count:0, rolling:{}, last_observation_at:null}),
+            declared_at: (.profile.declared_at // null),
+            created_at:  $now,
+            last_used_at: $now
+          }
+        }
+      },
+      custom_skills: (.custom_skills // [])
+    }
+  ' "$CONFIG_FILE")"
+  _atomic_write "$CONFIG_FILE" "$migrated"
+
+  # Migrate the old flat observations log into observations/default.jsonl
+  if [ -f "$CONFIG_DIR/observations.jsonl" ] && [ ! -d "$CONFIG_DIR/observations" ]; then
+    mkdir -p "$CONFIG_DIR/observations"
+    mv "$CONFIG_DIR/observations.jsonl" "$CONFIG_DIR/observations/default.jsonl"
+  fi
+
+  echo "[fstack-config] migrated to v0.2.0 (created subprofile 'default')" >&2
+}
+
+# Resolve the active subprofile key (after migration)
+_active_key() {
+  jq -r '.profile.active // "default"' "$CONFIG_FILE"
 }
 
 cmd="${1:-}"
@@ -58,74 +104,105 @@ case "$cmd" in
       echo "$CONFIG_FILE already exists" >&2
       exit 1
     fi
-    if [ -z "$TEMPLATE_FILE" ] || [ ! -f "$TEMPLATE_FILE" ]; then
-      echo "fstack-config: template not found" >&2
-      exit 1
-    fi
+    [ -z "$TEMPLATE_FILE" ] || [ ! -f "$TEMPLATE_FILE" ] && { echo "fstack-config: template not found" >&2; exit 1; }
     source_path="${1:-}"
     installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     jq --arg sp "$source_path" --arg at "$installed_at" \
-       '.install.source_path = $sp | .install.installed_at = $at' \
+       '.install.source_path = $sp
+        | .install.installed_at = $at
+        | .profile.subprofiles.default.created_at = $at
+        | .profile.subprofiles.default.last_used_at = $at' \
        "$TEMPLATE_FILE" > "$CONFIG_FILE.tmp"
     mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     echo "$CONFIG_FILE"
     ;;
+  migrate)
+    _require_jq
+    _maybe_migrate
+    ;;
   show)
     _require_jq
-    if [ ! -f "$CONFIG_FILE" ]; then
-      echo "fstack-config: not initialized (run fstack-config init)" >&2
-      exit 1
-    fi
+    [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
+    _maybe_migrate
     cat "$CONFIG_FILE"
+    ;;
+  active)
+    _require_jq
+    [ -f "$CONFIG_FILE" ] || { echo ""; exit 0; }
+    _maybe_migrate
+    _active_key
     ;;
   get)
     _require_jq
     key="${1:-}"
-    if [ -z "$key" ]; then
-      echo "usage: fstack-config get <dot.path>" >&2
-      exit 2
-    fi
+    [ -z "$key" ] && { echo "usage: fstack-config get <dot.path>" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo ""; exit 0; }
-    # Convert dot path to jq path
-    jq_path=".$key"
-    val="$(jq -r "$jq_path // empty" "$CONFIG_FILE" 2>/dev/null || true)"
-    printf '%s' "$val"
+    _maybe_migrate
+    jq -r ".$key // empty" "$CONFIG_FILE" 2>/dev/null || true
+    ;;
+  get-active)
+    _require_jq
+    sub="${1:-}"
+    [ -z "$sub" ] && { echo "usage: fstack-config get-active <subpath>" >&2; exit 2; }
+    [ -f "$CONFIG_FILE" ] || { echo ""; exit 0; }
+    _maybe_migrate
+    active="$(_active_key)"
+    jq -r ".profile.subprofiles[\"$active\"].$sub // empty" "$CONFIG_FILE" 2>/dev/null || true
     ;;
   set)
     _require_jq
-    key="${1:-}"
-    val="${2:-}"
-    if [ -z "$key" ]; then
-      echo "usage: fstack-config set <dot.path> <value>" >&2
-      exit 2
-    fi
+    key="${1:-}"; val="${2:-}"
+    [ -z "$key" ] && { echo "usage: fstack-config set <dot.path> <value>" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
+    _maybe_migrate
     jq_path=".$key"
-    # Auto-detect type: number, bool, null, else string
     if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-      new_json="$(jq "$jq_path = ($val)" "$CONFIG_FILE")"
+      new="$(jq "$jq_path = ($val)" "$CONFIG_FILE")"
     elif [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
-      new_json="$(jq "$jq_path = $val" "$CONFIG_FILE")"
+      new="$(jq "$jq_path = $val" "$CONFIG_FILE")"
     else
-      new_json="$(jq --arg v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
+      new="$(jq --arg v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
     fi
-    _atomic_write "$CONFIG_FILE" "$new_json"
+    _atomic_write "$CONFIG_FILE" "$new"
     ;;
   set-json)
     _require_jq
-    key="${1:-}"
-    val="${2:-}"
-    if [ -z "$key" ]; then
-      echo "usage: fstack-config set-json <dot.path> <json>" >&2
-      exit 2
-    fi
+    key="${1:-}"; val="${2:-}"
+    [ -z "$key" ] && { echo "usage: fstack-config set-json <dot.path> <json>" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
-    jq_path=".$key"
-    new_json="$(jq --argjson v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
-    _atomic_write "$CONFIG_FILE" "$new_json"
+    _maybe_migrate
+    new="$(jq --argjson v "$val" ".$key = \$v" "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
+    ;;
+  set-active)
+    _require_jq
+    sub="${1:-}"; val="${2:-}"
+    [ -z "$sub" ] && { echo "usage: fstack-config set-active <subpath> <value>" >&2; exit 2; }
+    [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
+    _maybe_migrate
+    active="$(_active_key)"
+    jq_path=".profile.subprofiles[\"$active\"].$sub"
+    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+      new="$(jq "$jq_path = ($val)" "$CONFIG_FILE")"
+    elif [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
+      new="$(jq "$jq_path = $val" "$CONFIG_FILE")"
+    else
+      new="$(jq --arg v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
+    fi
+    _atomic_write "$CONFIG_FILE" "$new"
+    ;;
+  set-active-json)
+    _require_jq
+    sub="${1:-}"; val="${2:-}"
+    [ -z "$sub" ] && { echo "usage: fstack-config set-active-json <subpath> <json>" >&2; exit 2; }
+    [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
+    _maybe_migrate
+    active="$(_active_key)"
+    new="$(jq --argjson v "$val" ".profile.subprofiles[\"$active\"].$sub = \$v" "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
     ;;
   ""|help|-h|--help)
-    sed -n '2,15p' "$0"
+    sed -n '2,17p' "$0"
     ;;
   *)
     echo "fstack-config: unknown command '$cmd'" >&2

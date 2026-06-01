@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# fstack-profile: pretty-print and summarize the developer profile
+# fstack-profile: inspect and manage subprofiles
 #
 # Usage:
-#   fstack-profile show                  # human-friendly summary
-#   fstack-profile json                  # raw profile json
-#   fstack-profile vibe                  # one-line archetype
-#   fstack-profile dimensions            # dimensions only, key=value form
-#   fstack-profile stack                 # stack only, plain English
+#   fstack-profile show [<key>]            # active by default
+#   fstack-profile json [<key>]
+#   fstack-profile vibe [<key>]
+#   fstack-profile dimensions [<key>]
+#   fstack-profile stack [<key>]
+#   fstack-profile list                    # all subprofiles, compact
+#   fstack-profile use <key>               # switch active
+#   fstack-profile create <key> [--label <text>] [--description <text>] [--clone-from <existing>]
+#   fstack-profile rename <old> <new>
+#   fstack-profile remove <key>            # cannot remove last
+#   fstack-profile active                  # prints active key
 
 set -euo pipefail
 
@@ -15,87 +21,231 @@ while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
 BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
 CONFIG="$BIN_DIR/fstack-config"
 
-if ! "$CONFIG" exists; then
-  echo "fstack-profile: not initialized. run /fstack to set up" >&2
-  exit 1
-fi
-
+"$CONFIG" exists || { echo "fstack-profile: not initialized. run /fstack to set up" >&2; exit 1; }
+"$CONFIG" migrate >/dev/null 2>&1 || true
 CONFIG_FILE="$("$CONFIG" path)"
 
-# Band label for 0..1 score
+_atomic_write() {
+  local path="$1" content="$2"
+  local tmp; tmp="$(mktemp "${path}.XXXXXX")"
+  printf '%s\n' "$content" > "$tmp"
+  mv "$tmp" "$path"
+}
+
 _band() {
-  local v="$1" low_label="$2" mid_label="$3" high_label="$4"
+  local v="$1" lo="$2" mi="$3" hi="$4"
   if [ -z "$v" ] || [ "$v" = "null" ]; then echo "unset"; return; fi
-  awk -v v="$v" -v lo="$low_label" -v mi="$mid_label" -v hi="$high_label" 'BEGIN {
-    if (v < 0.35) print lo;
-    else if (v < 0.65) print mi;
-    else print hi;
+  awk -v v="$v" -v lo="$lo" -v mi="$mi" -v hi="$hi" 'BEGIN {
+    if (v < 0.35) print lo; else if (v < 0.65) print mi; else print hi
   }'
 }
 
+_resolve_key() {
+  local k="${1:-}"
+  if [ -z "$k" ]; then
+    jq -r '.profile.active' "$CONFIG_FILE"
+  else
+    echo "$k"
+  fi
+}
+
+_assert_exists() {
+  local k="$1"
+  local has
+  has="$(jq -r --arg k "$k" '.profile.subprofiles | has($k)' "$CONFIG_FILE")"
+  [ "$has" = "true" ] || { echo "fstack-profile: no subprofile '$k'" >&2; exit 1; }
+}
+
 cmd="${1:-show}"
+shift || true
 
 case "$cmd" in
-  json)
-    jq '.profile' "$CONFIG_FILE"
+  active)
+    jq -r '.profile.active' "$CONFIG_FILE"
     ;;
-  dimensions)
-    jq -r '.profile.developer | to_entries | .[] | "\(.key)=\(.value)"' "$CONFIG_FILE"
-    ;;
-  stack)
+
+  list)
     jq -r '
-      .stack
+      .profile.active as $a
+      | .profile.subprofiles
       | to_entries
-      | map(select(.key != "declared_at" and (.value | type == "array") and (.value | length > 0)))
       | .[]
-      | "\(.key): \(.value | join(", "))"
+      | (if .key == $a then "* " else "  " end) + "\(.key)  \(.value.label // .key)" + (if .value.description then " — \(.value.description)" else "" end)
     ' "$CONFIG_FILE"
     ;;
+
+  use)
+    key="${1:-}"; [ -z "$key" ] && { echo "usage: fstack-profile use <key>" >&2; exit 2; }
+    _assert_exists "$key"
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    new="$(jq --arg k "$key" --arg now "$now" \
+      '.profile.active = $k
+       | .profile.subprofiles[$k].last_used_at = $now' "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
+    echo "active: $key"
+    ;;
+
+  create)
+    key="${1:-}"; shift || true
+    [ -z "$key" ] && { echo "usage: fstack-profile create <key> [--label X] [--description Y] [--clone-from Z]" >&2; exit 2; }
+    [[ "$key" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "fstack-profile: key must be lowercase alphanumeric + dash" >&2; exit 1; }
+    has="$(jq -r --arg k "$key" '.profile.subprofiles | has($k)' "$CONFIG_FILE")"
+    [ "$has" = "true" ] && { echo "fstack-profile: '$key' already exists" >&2; exit 1; }
+    label="$key"; desc=""; clone=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --label) label="$2"; shift 2;;
+        --description) desc="$2"; shift 2;;
+        --clone-from) clone="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ -n "$clone" ]; then
+      _assert_exists "$clone"
+      new="$(jq --arg k "$key" --arg src "$clone" --arg lbl "$label" --arg desc "$desc" --arg now "$now" \
+        '.profile.subprofiles[$k] = (.profile.subprofiles[$src]
+            | .label = $lbl
+            | .description = (if $desc == "" then null else $desc end)
+            | .created_at = $now
+            | .last_used_at = $now
+            | .inferred = {sample_count:0, rolling:{}, last_observation_at:null}
+            | .declared_at = null)' \
+        "$CONFIG_FILE")"
+    else
+      new="$(jq --arg k "$key" --arg lbl "$label" --arg desc "$desc" --arg now "$now" \
+        '.profile.subprofiles[$k] = {
+            label: $lbl,
+            description: (if $desc == "" then null else $desc end),
+            developer: {risk_tolerance:null, bias_for_action:null, scope_appetite:null, test_rigor:null, architecture_care:null},
+            preferences: {code_style:null, comment_level:null, abstraction:null, error_handling:null, type_safety:null},
+            stack: {language:[], runtime:[], frontend:[], ui:[], backend_framework:[], database:[], orm:[], auth:[], deploy:[], testing:[], declared_at:null},
+            inferred: {sample_count:0, rolling:{}, last_observation_at:null},
+            declared_at: null,
+            created_at: $now,
+            last_used_at: null
+         }' \
+        "$CONFIG_FILE")"
+    fi
+    _atomic_write "$CONFIG_FILE" "$new"
+    echo "created: $key${clone:+ (cloned from $clone)}"
+    ;;
+
+  rename)
+    old="${1:-}"; new="${2:-}"
+    [ -z "$old" ] || [ -z "$new" ] && { echo "usage: fstack-profile rename <old> <new>" >&2; exit 2; }
+    _assert_exists "$old"
+    [[ "$new" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "fstack-profile: new key must be lowercase alphanumeric + dash" >&2; exit 1; }
+    has_new="$(jq -r --arg k "$new" '.profile.subprofiles | has($k)' "$CONFIG_FILE")"
+    [ "$has_new" = "true" ] && { echo "fstack-profile: '$new' already exists" >&2; exit 1; }
+    updated="$(jq --arg old "$old" --arg new "$new" \
+      '.profile.subprofiles[$new] = .profile.subprofiles[$old]
+       | del(.profile.subprofiles[$old])
+       | if .profile.active == $old then .profile.active = $new else . end' \
+      "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$updated"
+    # Rename observation log too
+    if [ -f "${FSTACK_HOME:-$HOME/.fstack}/observations/$old.jsonl" ]; then
+      mv "${FSTACK_HOME:-$HOME/.fstack}/observations/$old.jsonl" \
+         "${FSTACK_HOME:-$HOME/.fstack}/observations/$new.jsonl"
+    fi
+    echo "renamed: $old -> $new"
+    ;;
+
+  remove)
+    key="${1:-}"; [ -z "$key" ] && { echo "usage: fstack-profile remove <key>" >&2; exit 2; }
+    _assert_exists "$key"
+    count="$(jq -r '.profile.subprofiles | length' "$CONFIG_FILE")"
+    [ "$count" -le 1 ] && { echo "fstack-profile: cannot remove the last subprofile" >&2; exit 1; }
+    active="$(jq -r '.profile.active' "$CONFIG_FILE")"
+    new="$(jq --arg k "$key" \
+      'del(.profile.subprofiles[$k])
+       | if .profile.active == $k then .profile.active = (.profile.subprofiles | keys[0]) else . end' \
+      "$CONFIG_FILE")"
+    _atomic_write "$CONFIG_FILE" "$new"
+    rm -f "${FSTACK_HOME:-$HOME/.fstack}/observations/$key.jsonl"
+    [ "$active" = "$key" ] && echo "removed: $key (active switched to $(jq -r '.profile.active' "$CONFIG_FILE"))" || echo "removed: $key"
+    ;;
+
+  json)
+    key="$(_resolve_key "${1:-}")"
+    _assert_exists "$key"
+    jq --arg k "$key" '.profile.subprofiles[$k]' "$CONFIG_FILE"
+    ;;
+
+  dimensions)
+    key="$(_resolve_key "${1:-}")"
+    _assert_exists "$key"
+    jq -r --arg k "$key" '.profile.subprofiles[$k].developer | to_entries | .[] | "\(.key)=\(.value)"' "$CONFIG_FILE"
+    ;;
+
+  stack)
+    key="$(_resolve_key "${1:-}")"
+    _assert_exists "$key"
+    jq -r --arg k "$key" '
+      .profile.subprofiles[$k].stack
+      | to_entries
+      | map(select(.key != "declared_at" and (.value | type == "array") and (.value | length > 0)))
+      | .[] | "\(.key): \(.value | join(", "))"
+    ' "$CONFIG_FILE"
+    ;;
+
   vibe)
-    # Build a simple archetype from declared dimensions
-    risk="$(jq -r '.profile.developer.risk_tolerance // empty' "$CONFIG_FILE")"
-    action="$(jq -r '.profile.developer.bias_for_action // empty' "$CONFIG_FILE")"
-    scope="$(jq -r '.profile.developer.scope_appetite // empty' "$CONFIG_FILE")"
-    arch="$(jq -r '.profile.developer.architecture_care // empty' "$CONFIG_FILE")"
+    key="$(_resolve_key "${1:-}")"
+    _assert_exists "$key"
+    risk="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.risk_tolerance // empty' "$CONFIG_FILE")"
+    action="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.bias_for_action // empty' "$CONFIG_FILE")"
+    scope="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.scope_appetite // empty' "$CONFIG_FILE")"
+    arch="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.architecture_care // empty' "$CONFIG_FILE")"
     if [ -z "$risk$action$scope$arch" ]; then
-      echo "unset. run /fstack-profile setup to declare yours"
+      echo "$key: unset"
       exit 0
     fi
-    # Crude but useful labeling
     risk_b="$(_band "${risk:-0.5}" cautious balanced bold)"
     action_b="$(_band "${action:-0.5}" deliberate balanced shipper)"
     scope_b="$(_band "${scope:-0.5}" lean balanced ambitious)"
     arch_b="$(_band "${arch:-0.5}" pragmatic balanced principled)"
-    echo "$risk_b · $action_b · $scope_b · $arch_b"
+    echo "$key: $risk_b · $action_b · $scope_b · $arch_b"
     ;;
+
   show|"")
-    risk="$(jq -r '.profile.developer.risk_tolerance // empty' "$CONFIG_FILE")"
-    action="$(jq -r '.profile.developer.bias_for_action // empty' "$CONFIG_FILE")"
-    scope="$(jq -r '.profile.developer.scope_appetite // empty' "$CONFIG_FILE")"
-    rigor="$(jq -r '.profile.developer.test_rigor // empty' "$CONFIG_FILE")"
-    arch="$(jq -r '.profile.developer.architecture_care // empty' "$CONFIG_FILE")"
-    declared_at="$(jq -r '.profile.declared_at // "never"' "$CONFIG_FILE")"
-    samples="$(jq -r '.profile.inferred.sample_count // 0' "$CONFIG_FILE")"
+    key="$(_resolve_key "${1:-}")"
+    _assert_exists "$key"
+    active="$(jq -r '.profile.active' "$CONFIG_FILE")"
+    risk="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.risk_tolerance // empty' "$CONFIG_FILE")"
+    action="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.bias_for_action // empty' "$CONFIG_FILE")"
+    scope="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.scope_appetite // empty' "$CONFIG_FILE")"
+    rigor="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.test_rigor // empty' "$CONFIG_FILE")"
+    arch="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.architecture_care // empty' "$CONFIG_FILE")"
+    label="$(jq -r --arg k "$key" '.profile.subprofiles[$k].label // $k' "$CONFIG_FILE")"
+    desc="$(jq -r --arg k "$key" '.profile.subprofiles[$k].description // ""' "$CONFIG_FILE")"
+    declared="$(jq -r --arg k "$key" '.profile.subprofiles[$k].declared_at // "never"' "$CONFIG_FILE")"
+    samples="$(jq -r --arg k "$key" '.profile.subprofiles[$k].inferred.sample_count // 0' "$CONFIG_FILE")"
 
-    echo "DEVELOPER PROFILE"
-    printf "  risk_tolerance:    %s\n" "${risk:-unset} ($(_band "${risk:-0.5}" cautious balanced bold))"
-    printf "  bias_for_action:   %s\n" "${action:-unset} ($(_band "${action:-0.5}" deliberate balanced shipper))"
-    printf "  scope_appetite:    %s\n" "${scope:-unset} ($(_band "${scope:-0.5}" lean balanced ambitious))"
-    printf "  test_rigor:        %s\n" "${rigor:-unset} ($(_band "${rigor:-0.5}" happy-path balanced full-coverage))"
-    printf "  architecture_care: %s\n" "${arch:-unset} ($(_band "${arch:-0.5}" pragmatic balanced principled))"
-
+    if [ "$key" = "$active" ]; then
+      echo "SUBPROFILE: $key (active) — $label"
+    else
+      echo "SUBPROFILE: $key — $label"
+    fi
+    [ -n "$desc" ] && echo "  $desc"
+    echo ""
+    echo "DEVELOPER"
+    printf "  risk_tolerance:    %s (%s)\n" "${risk:-unset}" "$(_band "${risk:-0.5}" cautious balanced bold)"
+    printf "  bias_for_action:   %s (%s)\n" "${action:-unset}" "$(_band "${action:-0.5}" deliberate balanced shipper)"
+    printf "  scope_appetite:    %s (%s)\n" "${scope:-unset}" "$(_band "${scope:-0.5}" lean balanced ambitious)"
+    printf "  test_rigor:        %s (%s)\n" "${rigor:-unset}" "$(_band "${rigor:-0.5}" happy-path balanced full-coverage)"
+    printf "  architecture_care: %s (%s)\n" "${arch:-unset}" "$(_band "${arch:-0.5}" pragmatic balanced principled)"
     echo ""
     echo "PREFERENCES"
-    jq -r '.profile.preferences | to_entries | .[] | "  \(.key): \(.value // "unset")"' "$CONFIG_FILE"
-
+    jq -r --arg k "$key" '.profile.subprofiles[$k].preferences | to_entries | .[] | "  \(.key): \(.value // "unset")"' "$CONFIG_FILE"
     echo ""
     echo "STACK"
-    "$0" stack | sed 's/^/  /'
-
+    "$0" stack "$key" | sed 's/^/  /' || true
     echo ""
-    echo "Declared at: $declared_at"
-    echo "Observations logged: $samples"
+    echo "Declared: $declared"
+    echo "Observations: $samples"
     ;;
+
   *)
     echo "fstack-profile: unknown command '$cmd'" >&2
     exit 2
