@@ -137,10 +137,29 @@ _migrate_v03() {
   echo "[fstack-config] migrated to v0.3.0 (implicit clustering enabled)" >&2
 }
 
+# v0.3 -> v0.4 (behavior-first clustering)
+_migrate_v04() {
+  local needs
+  needs="$(jq -r 'if .version < "0.4.0" then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
+  [ "$needs" = "yes" ] || return 0
+  local migrated
+  migrated="$(jq '
+    .version = "0.4.0"
+    | .profile.subprofiles |= with_entries(
+        select(.value.origin != "inferred")
+        | .value.context_distribution = (.value.context_distribution // {})
+      )
+    | .profile.last_cluster_at = null
+  ' "$CONFIG_FILE")"
+  _atomic_write "$CONFIG_FILE" "$migrated"
+  echo "[fstack-config] migrated to v0.4.0 (dropped repo+band clusters; behavior-first re-cluster on next /fstack)" >&2
+}
+
 _maybe_migrate() {
   [ -f "$CONFIG_FILE" ] || return 0
   _migrate_v02
   _migrate_v03
+  _migrate_v04
 }
 
 _active_key() {

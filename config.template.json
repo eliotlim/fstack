@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.4.0",
   "install": {
     "mode": "dev",
     "install_path": "~/.claude/skills",
@@ -50,6 +50,7 @@
           "last_observation_at": null
         },
         "examples": [],
+        "context_distribution": {},
         "cluster_meta": null,
         "declared_at": null,
         "created_at": null,

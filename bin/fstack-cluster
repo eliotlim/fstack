@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# fstack-cluster: derive inferred subprofiles from session observations.
+# fstack-cluster: derive inferred subprofiles from observed behavior.
 #
-# Groups observations by (repo, hour_band). Emits one inferred subprofile
-# per cluster that crosses the sample threshold. Manual subprofiles are
-# preserved untouched.
+# Behavior comes first. Observations roll up into sessions (repo + branch + date).
+# Each session is projected onto two axes:
+#   rigor    = avg of (1 - risk_tolerance), test_rigor, architecture_care
+#   appetite = avg of bias_for_action, scope_appetite
+# Both fall back to 0.5 when no relevant dimension was observed.
+#
+# Each axis is binned into low / mid / high. 3 x 3 = 9 cells. Cells with
+# >= threshold sessions become inferred subprofiles. Cluster key is
+# "<rigor_bin>-<appetite_bin>" (e.g. "rigorous-steady"). Label aliases below.
+#
+# Context (repo, hour_band) is descriptive, not a clustering axis. It feeds
+# context_distribution: a count of {<repo> @ <band>: count} used at match time.
 #
 # Usage:
 #   fstack-cluster cluster [--threshold N] [--max-age-days N]
-#   fstack-cluster match [--repo R] [--hour H]   # prints best matching subprofile key
-#   fstack-cluster status                        # last cluster time, inferred count
-#
-# Hour bands: late-night (22..5), morning (6..11), afternoon (12..17), evening (18..21).
+#   fstack-cluster match [--repo R] [--hour H]
+#   fstack-cluster status
 
 set -euo pipefail
 
@@ -49,7 +56,7 @@ shift || true
 
 case "$cmd" in
   cluster)
-    threshold=3
+    threshold=3       # minimum observation count per cluster
     max_age_days=60
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -62,63 +69,176 @@ case "$cmd" in
 
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cutoff_epoch=$(( $(date +%s) - max_age_days * 86400 ))
-
-    # Note: date math is platform-flaky in jq, so prefilter by ts string compare
-    # (ISO8601 is lexicographically sortable). Build cutoff in same format.
     cutoff_ts="$(date -u -r "$cutoff_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$cutoff_epoch" +%Y-%m-%dT%H:%M:%SZ)"
 
-    clusters="$(jq -s --argjson th "$threshold" --arg cutoff "$cutoff_ts" '
-      def band: if . == null then "unknown" elif (. < 6 or . >= 22) then "late-night" elif . < 12 then "morning" elif . < 18 then "afternoon" else "evening" end;
-      def repo_of: (.context.repo // "unknown");
-      def keyfor: repo_of + "-" + (.context.hour | band);
-      map(select(.ts >= $cutoff))
-      | group_by(repo_of + ":" + (.context.hour | band))
-      | map({
-          key: (.[0] | keyfor),
-          repo: (.[0] | repo_of),
-          hour_band: (.[0].context.hour | band),
-          sample_count: length,
-          last_seen: (max_by(.ts) | .ts),
-          dimensions: (
-            map(select(.dimension != null))
-            | if length == 0 then {} else
-                group_by(.dimension)
-                | map({key:.[0].dimension, value:((map(.signal*.weight)|add)/(map(.weight)|add))})
-                | from_entries
-              end
+    clusters="$(jq -s --argjson th "$threshold" --arg cutoff "$cutoff_ts" --arg now "$now" '
+      def band:
+        if . == null then "unknown"
+        elif (. < 6 or . >= 22) then "late-night"
+        elif . < 12 then "morning"
+        elif . < 18 then "afternoon"
+        else "evening" end;
+      def hbin: if . < 0.4 then "loose" elif . < 0.65 then "balanced" else "rigorous" end;
+      def abin: if . < 0.4 then "small" elif . < 0.65 then "steady" else "bold" end;
+      def branch_norm:
+        if . == null or . == "" then "?"
+        elif (. == "main" or . == "master" or . == "develop" or . == "trunk") then "main"
+        elif test("^(spike|exp|experiment)[/-]") then "spike"
+        elif test("^(feature|feat)[/-]") then "feature"
+        elif test("^(fix|bugfix|hotfix)[/-]") then "fix"
+        elif test("^(release|rc)[/-]") then "release"
+        elif test("^(chore|refactor)[/-]") then "chore"
+        else "other" end;
+      def alias_for(k):
+        {"loose-small":"quick-hack",
+         "loose-steady":"iterate",
+         "loose-bold":"move-fast",
+         "balanced-small":"polish",
+         "balanced-steady":"default-shipping",
+         "balanced-bold":"growth-push",
+         "rigorous-small":"maintenance",
+         "rigorous-steady":"production",
+         "rigorous-bold":"scale-push"}[k] // k;
+
+      # 1) Filter, drop annotate-only entries
+      map(select(.ts >= $cutoff and .dimension != null))
+
+      # 2) Aggregate per work-context = (repo, branch_norm)
+      | map(. + {
+          _repo: (.context.repo // "unknown"),
+          _branch_norm: (.context.branch | branch_norm)
+        })
+      | map(. + {_skey: (._repo + ":" + ._branch_norm)})
+      | group_by(._skey)
+      | map(
+          {
+            skey: .[0]._skey,
+            repo: .[0]._repo,
+            branch_norm: .[0]._branch_norm,
+            sample_count: length,
+            last_ts: (max_by(.ts) | .ts),
+            dims: (
+              group_by(.dimension)
+              | map({key: .[0].dimension, value: ((map(.signal * .weight) | add) / (map(.weight) | add))})
+              | from_entries
+            ),
+            hour_counts: (
+              map(.context.hour // 12) | map(tostring)
+              | group_by(.) | map({key: .[0], value: length})
+              | from_entries
+            ),
+            annotations: (
+              map(.annotation // empty)
+              | map(select(. != null and . != ""))
+              | unique
+            )
+          }
+        )
+
+      # 3) Project each context to (rigor, appetite); 0.5 fallback if no relevant dim
+      | map(. + {
+          rigor: (
+            [
+              (if (.dims | has("risk_tolerance")) then (1 - .dims.risk_tolerance) else null end),
+              .dims.test_rigor,
+              .dims.architecture_care
+            ] | map(select(. != null))
+            | if length == 0 then 0.5 else (add / length) end
           ),
-          examples: (
-            map(.annotation // empty)
-            | map(select(. != null and . != ""))
-            | unique
-            | .[0:3]
+          appetite: (
+            [.dims.bias_for_action, .dims.scope_appetite]
+            | map(select(. != null))
+            | if length == 0 then 0.5 else (add / length) end
           )
         })
-      | map(select(.sample_count >= $th))
+      | map(. + {bin: ((.rigor | hbin) + "-" + (.appetite | abin))})
+
+      # 4) Group contexts by 2-D cell, emit clusters
+      | group_by(.bin)
+      | map(
+          {
+            key: .[0].bin,
+            label: (alias_for(.[0].bin)),
+            rigor_bin: (.[0].bin | split("-")[0]),
+            appetite_bin: (.[0].bin | split("-")[1]),
+            context_count: length,
+            observation_count: (map(.sample_count) | add),
+            last_seen: (max_by(.last_ts) | .last_ts),
+            dimensions: (
+              [.[] | .dims | to_entries[]]
+              | group_by(.key)
+              | map({key: .[0].key, value: ((map(.value) | add) / length)})
+              | from_entries
+              | ({risk_tolerance: null, bias_for_action: null, scope_appetite: null, test_rigor: null, architecture_care: null}) + .
+            ),
+            rigor_mean: ([.[] | .rigor] | add / length),
+            appetite_mean: ([.[] | .appetite] | add / length),
+            context_distribution: (
+              [.[] |
+                .repo as $r | .branch_norm as $b |
+                .hour_counts | to_entries[] |
+                {key: ($r + ":" + $b + " @ " + ((.key | tonumber) | band)), count: .value}
+              ]
+              | group_by(.key)
+              | map({key: .[0].key, value: (map(.count) | add)})
+              | from_entries
+            ),
+            examples: (
+              [.[] | .annotations[]] | unique | .[0:5]
+            )
+          }
+        )
+      | map(select(.observation_count >= $th))
     ' "$SESSIONS")"
 
-    # Update config: write each cluster as an inferred subprofile, do NOT touch
-    # entries whose origin is "manual".
+    # Apply clusters into config: update or insert inferred subprofiles, preserve manuals.
+    # First: drop existing inferred subprofiles that no longer have a cluster.
+    new_keys="$(jq -r 'map(.key)[]' <<<"$clusters" | sort -u)"
     new="$(jq --argjson clusters "$clusters" --arg now "$now" '
+      def context_summary($cd):
+        ($cd | to_entries | sort_by(-.value))
+        | if length == 0 then "no context data"
+          else
+            (.[0:2] | map("\(.key) (\(.value))") | join(", "))
+            + (if length > 2 then ", +\(length - 2) more" else "" end)
+          end;
       def merge_inferred($c; $now):
         {
-          label: (.label // $c.key),
-          description: ("inferred from " + ($c.sample_count|tostring) + " observations on " + $c.repo + " during " + $c.hour_band),
+          label: ($c.label),
+          description: ("inferred: \($c.rigor_bin) rigor, \($c.appetite_bin) appetite. Seen in: " + context_summary($c.context_distribution)),
           origin: "inferred",
-          developer: (
-            {risk_tolerance:null, bias_for_action:null, scope_appetite:null, test_rigor:null, architecture_care:null}
-            + ($c.dimensions | with_entries(select(.key | IN("risk_tolerance","bias_for_action","scope_appetite","test_rigor","architecture_care"))))
-          ),
+          developer: ($c.dimensions),
           preferences: (.preferences // {code_style:null, comment_level:null, abstraction:null, error_handling:null, type_safety:null}),
           stack: (.stack // {language:[], runtime:[], frontend:[], ui:[], backend_framework:[], database:[], orm:[], auth:[], deploy:[], testing:[], declared_at:null}),
-          inferred: {sample_count: $c.sample_count, rolling: $c.dimensions, last_observation_at: $c.last_seen},
+          inferred: {
+            sample_count: $c.observation_count,
+            rolling: $c.dimensions,
+            last_observation_at: $c.last_seen
+          },
           examples: $c.examples,
-          cluster_meta: {repo: $c.repo, hour_band: $c.hour_band, last_clustered_at: $now},
+          context_distribution: $c.context_distribution,
+          cluster_meta: {
+            method: "behavior-2d-v2",
+            rigor_bin: $c.rigor_bin,
+            appetite_bin: $c.appetite_bin,
+            rigor_mean: $c.rigor_mean,
+            appetite_mean: $c.appetite_mean,
+            context_count: $c.context_count,
+            observation_count: $c.observation_count,
+            last_clustered_at: $now
+          },
           declared_at: null,
           created_at: (.created_at // $now),
           last_used_at: (.last_used_at // null)
         };
-      .profile.last_cluster_at = $now
+
+      # Step A: drop stale inferred entries (not in new clusters)
+      ($clusters | map(.key)) as $keep
+      | .profile.subprofiles |= with_entries(
+          select(.value.origin == "manual" or (.key as $k | $keep | index($k)))
+        )
+      # Step B: upsert each cluster into subprofiles, skipping manual collisions
+      | .profile.last_cluster_at = $now
       | reduce $clusters[] as $c (
           .;
           if (.profile.subprofiles[$c.key].origin // "inferred") == "manual"
@@ -131,15 +251,17 @@ case "$cmd" in
 
     n_inferred="$(jq -r '[.profile.subprofiles[] | select(.origin == "inferred")] | length' "$CONFIG_FILE")"
     n_manual="$(jq -r '[.profile.subprofiles[] | select(.origin == "manual")] | length' "$CONFIG_FILE")"
-    echo "clustered: $n_inferred inferred, $n_manual manual"
+    n_obs="$(jq -r --argjson clusters "$clusters" '$clusters | map(.observation_count) | add // 0' <<<"{}")"
+    echo "clustered: $n_inferred inferred (from $n_obs observations), $n_manual manual"
     ;;
 
   match)
-    repo=""; hour=""
+    repo=""; hour=""; branch=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --repo) repo="$2"; shift 2;;
         --hour) hour="$2"; shift 2;;
+        --branch) branch="$2"; shift 2;;
         *) shift;;
       esac
     done
@@ -148,23 +270,48 @@ case "$cmd" in
       repo="$(git rev-parse --show-toplevel 2>/dev/null | tr -d '\n' | awk -F/ '{print $NF}')"
       [ -z "$repo" ] && repo="unknown"
     fi
+    [ -z "$branch" ] && branch="$(git branch --show-current 2>/dev/null || echo "")"
     band="$(_band "$hour")"
 
-    # Prefer exact (repo, band) match, then (repo, *), then unset
-    jq -r --arg repo "$repo" --arg band "$band" '
-      [
-        # exact match
-        (.profile.subprofiles | to_entries[]
-          | select(.value.cluster_meta != null)
-          | select(.value.cluster_meta.repo == $repo and .value.cluster_meta.hour_band == $band)
-          | .key),
-        # repo match, any band
-        (.profile.subprofiles | to_entries[]
-          | select(.value.cluster_meta != null)
-          | select(.value.cluster_meta.repo == $repo)
-          | .key)
+    # Mirror branch_norm logic
+    case "$branch" in
+      ""|"?") branch_norm="?";;
+      main|master|develop|trunk) branch_norm="main";;
+      spike[-/]*|exp[-/]*|experiment[-/]*) branch_norm="spike";;
+      feature[-/]*|feat[-/]*) branch_norm="feature";;
+      fix[-/]*|bugfix[-/]*|hotfix[-/]*) branch_norm="fix";;
+      release[-/]*|rc[-/]*) branch_norm="release";;
+      chore[-/]*|refactor[-/]*) branch_norm="chore";;
+      *) branch_norm="other";;
+    esac
+
+    exact_key="$repo:$branch_norm @ $band"
+    repo_only_prefix="$repo:"
+
+    # Tiered match:
+    # 1. Exact (repo, branch_norm, band)
+    # 2. Any band, same (repo, branch_norm)
+    # 3. Any (repo, ?) — same repo, any branch/band
+    # Tiebreaker: total observation_count.
+    jq -r --arg exact "$exact_key" --arg rprefix "$repo_only_prefix" --arg rb "$repo:$branch_norm" '
+      def score($sp):
+        ($sp.context_distribution // {}) as $cd
+        | {
+            exact: ($cd[$exact] // 0),
+            same_rb: ([$cd | to_entries[] | select(.key | startswith($rb + " @ ")) | .value] | add // 0),
+            same_repo: ([$cd | to_entries[] | select(.key | startswith($rprefix)) | .value] | add // 0),
+            observations: ($sp.cluster_meta.observation_count // 0)
+          };
+      [.profile.subprofiles | to_entries[]
+        | select(.value.origin == "inferred")
+        | (score(.value)) as $s
+        | {key: .key, exact: $s.exact, same_rb: $s.same_rb, same_repo: $s.same_repo, observations: $s.observations}
       ]
-      | first // empty
+      | sort_by(-.exact, -.same_rb, -.same_repo, -.observations)
+      | (first // {})
+      | if ((.exact // 0) > 0 or (.same_rb // 0) > 0 or (.same_repo // 0) > 0)
+        then .key
+        else empty end
     ' "$CONFIG_FILE"
     ;;
 

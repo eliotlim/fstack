@@ -6,9 +6,9 @@ For an AI working *on* fstack source, not for users.
 
 Lightweight skill framework for full-stack product engineers. Built on Claude Code skills.
 
-- Profile-driven recommendations. 5 numeric dimensions + tech stack + code preferences.
-- **Implicit multi-mode.** Observations cluster by (repo, hour-band). Each cluster is a subprofile fstack recognizes. Auto-switches on `/fstack` invocation when context matches a cluster.
-- Explicit mode is opt-in: user creates named manual subprofiles or pins one.
+- Profile-driven recommendations. 5 dimensions + tech stack + code preferences.
+- **Behavior-first clustering.** Observations roll up into work contexts `(repo, branch_norm)`. Each context lives in a 2-D behavior space (rigor × appetite). Bin cells with enough observations become inferred subprofiles. Repo + branch + hour are descriptive, used at match time.
+- Explicit subprofiles are opt-in via `create`.
 - Tight surface. Seven skills.
 - No bun, no node. Bash + jq.
 
@@ -20,17 +20,17 @@ Pairs with [gstack](https://github.com/). No shared state.
 /Users/eliot/Workspaces/fstack/
 ├── README.md           # users
 ├── CLAUDE.md           # this
-├── VERSION             # 0.3.0
+├── VERSION             # 0.4.0
 ├── LICENSE
-├── install             # dev / prod installer
+├── install
 ├── config.template.json
 ├── bin/
-│   ├── fstack-config   # get/set + get-active/set-active + migrate
-│   ├── fstack-profile  # subprofile management
-│   ├── fstack-observe  # signal log + context capture
-│   └── fstack-cluster  # cluster observations into inferred subprofiles
-├── fstack/             # /fstack: router, auto-cluster, auto-switch, setup
-├── fstack-profile/     # show / edit / pin / unpin / list / use / create / cluster
+│   ├── fstack-config   # get/set/get-active/set-active + migrations
+│   ├── fstack-profile  # subprofile UI
+│   ├── fstack-observe  # signal log + context auto-capture
+│   └── fstack-cluster  # behavior-first clustering
+├── fstack/
+├── fstack-profile/
 ├── fstack-stack/
 ├── fstack-skill/
 ├── fstack-scaffold/
@@ -43,15 +43,15 @@ Pairs with [gstack](https://github.com/). No shared state.
 `~/.fstack/`:
 
 - `config.json`: versioned, subprofiled.
-- `observations/sessions.jsonl`: append-only signal log (single file, all observations across all subprofiles).
-- `observations/_legacy/`: per-subprofile logs from v0.2 (untouched, kept for safety).
+- `observations/sessions.jsonl`: append-only signal log.
+- `observations/_legacy/`: v0.2 per-subprofile logs (untouched, kept for safety).
 - `skills/<name>/SKILL.md`: user-created custom skills.
 
-## Schema (v0.3.0)
+## Schema (v0.4.0)
 
 ```json
 {
-  "version": "0.3.0",
+  "version": "0.4.0",
   "install": { ... },
   "profile": {
     "active": "<key>",
@@ -68,14 +68,24 @@ Pairs with [gstack](https://github.com/). No shared state.
         "stack":       { "language": [], "...": [], "declared_at": "...|null" },
         "inferred":    { "sample_count": N, "rolling": {} },
         "examples":    [],
-        "cluster_meta": { "repo": "...", "hour_band": "morning|afternoon|evening|late-night" } | null,
+        "context_distribution": { "<repo>:<branch_norm> @ <band>": count, "..." : "..." },
+        "cluster_meta": {
+          "method": "behavior-2d-v2",
+          "rigor_bin": "loose|balanced|rigorous",
+          "appetite_bin": "small|steady|bold",
+          "rigor_mean": 0..1,
+          "appetite_mean": 0..1,
+          "context_count": N,
+          "observation_count": N,
+          "last_clustered_at": "..."
+        } | null,
         "declared_at": "...|null",
         "created_at":  "...",
         "last_used_at": "..."
       }
     }
   },
-  "custom_skills": [{ "name": "...", "description": "...", "path": "..." }]
+  "custom_skills": [...]
 }
 ```
 
@@ -84,13 +94,13 @@ Pairs with [gstack](https://github.com/). No shared state.
 ```json
 {
   "ts": "...",
-  "profile_at_log": "<active subprofile when logged>",
+  "profile_at_log": "<active subprofile at log time>",
   "skill": "fstack-scaffold|fstack-api|fstack-schema|...",
   "dimension": "risk_tolerance|bias_for_action|scope_appetite|test_rigor|architecture_care|null",
-  "signal": 0.0..1.0|null,
+  "signal": 0..1|null,
   "weight": 1,
   "annotation": "short human-readable text",
-  "context_note": "(legacy free-form context, deprecated, prefer annotation)",
+  "context_note": "(legacy free-form, deprecated)",
   "context": {
     "repo": "<git toplevel basename>|null",
     "branch": "<git current branch>|null",
@@ -101,41 +111,55 @@ Pairs with [gstack](https://github.com/). No shared state.
 }
 ```
 
-`annotate` entries set `dimension: null, signal: null, weight: 0` — they exist for cluster examples only.
+## Clustering algorithm (behavior-first)
 
-## Clustering
+1. Filter observations: drop annotate-only (no dimension), drop older than `--max-age-days` (default 60).
+2. Aggregate per work context `(repo, branch_norm)` where branch normalizes:
+   - `main / master / develop / trunk` → `main`
+   - `spike-* / exp-* / experiment-*` → `spike`
+   - `feature-* / feat-*` → `feature`
+   - `fix-* / bugfix-* / hotfix-*` → `fix`
+   - `release-* / rc-*` → `release`
+   - `chore-* / refactor-*` → `chore`
+   - else → `other`
+3. For each context, compute weighted mean per dimension across all its observations.
+4. Project to 2-D:
+   - `rigor` = avg of available `(1 - risk_tolerance, test_rigor, architecture_care)`. Fall back to 0.5.
+   - `appetite` = avg of available `(bias_for_action, scope_appetite)`. Fall back to 0.5.
+5. Bin each axis:
+   - rigor: `< 0.4` loose, `< 0.65` balanced, else rigorous
+   - appetite: `< 0.4` small, `< 0.65` steady, else bold
+6. Group contexts by 2-D cell. Cluster key = `<rigor_bin>-<appetite_bin>`.
+7. Filter cells with `observation_count < --threshold` (default 3).
+8. Emit each cluster as inferred subprofile. Compute:
+   - `developer.*` = centroid (mean of context means)
+   - `examples` = up to 5 unique annotations
+   - `context_distribution` = `{ "<repo>:<branch_norm> @ <band>": observation_count, ... }`
+9. Existing manual subprofiles untouched. Stale inferred subprofiles (no longer in clusters) dropped.
 
-`fstack-cluster cluster` groups `sessions.jsonl` entries by `(context.repo, context.hour | band)` where band is `late-night | morning | afternoon | evening`. Clusters crossing `--threshold N` (default 3) become inferred subprofiles. Each gets:
+Cluster keys are stable across reclusters (same cell → same key). Updates are upserts.
 
-- `developer.*`: weighted means of signals for known dimensions, others stay null.
-- `inferred.rolling`: same as developer.
-- `examples`: up to 3 unique annotations.
-- `cluster_meta`: { repo, hour_band, last_clustered_at }.
+## Matching algorithm
 
-Existing manual subprofiles are skipped — never overwritten by clustering. Existing inferred ones get updated in place (same key = `<repo>-<band>`).
+At `/fstack` start, given current `(repo, branch_norm, hour_band)`:
 
-`fstack-cluster match --repo X --hour H` returns the best subprofile key. Prefers exact (repo, band) match, then (repo, any band), then empty.
-
-Auto-cluster trigger lives in `/fstack` preamble:
-
-- Only if `observations >= 5`.
-- Only if `last_cluster_at` is null OR older than 24h.
-
-Auto-switch trigger:
-
-- Only if `auto_switch == true`.
-- Only if `pinned == null`.
-- Only if `match` returns a non-empty key different from `active`.
+1. Build candidate key `<repo>:<branch_norm> @ <band>`.
+2. Tiered score per inferred subprofile:
+   - exact match in `context_distribution` (strongest)
+   - any `<repo>:<branch_norm> @ *` (same repo + branch, any hour)
+   - any `<repo>:* @ *` (same repo, any branch/hour)
+   - tiebreaker: `cluster_meta.observation_count`
+3. Pick top-scoring cluster. If all scores zero, return empty (no switch).
 
 ## Conventions
 
 1. **No bun, no node.** Bash + jq.
-2. **Skills are stateless.** Durable state through `fstack-config` / `fstack-observe` / `fstack-cluster`. Don't write `config.json` directly.
-3. **Skills target active by default.** Use `get-active` / `set-active`. Specify a key only when explicitly inspecting another.
-4. **Annotations matter.** Domain skills log a short human-readable annotation per turn. Without annotations, inferred clusters have no examples — they're abstract numbers.
-5. **Preambles stay tight.** No telemetry, no upgrade checks, no MCP probing.
-6. **Confirm before writing declared values.** Free-form input + direct mutation is a trust boundary.
-7. **Stable bin path.** Skills resolve `_FSTACK_BIN` by following the SKILL.md symlink (dev) or falling back to common paths.
+2. **Skills are stateless.** Durable state through `fstack-config` / `fstack-observe` / `fstack-cluster`.
+3. **Skills target active by default.** Use `get-active` / `set-active`.
+4. **Annotations matter.** Domain skills log a short human-readable annotation per turn. Without annotations, cluster examples are empty and inferred subprofiles feel abstract.
+5. **Behavior is primary; context is descriptive.** Repo + branch + hour go into `context_distribution`, never into the cluster key.
+6. **Preambles stay tight.** No telemetry, no upgrade checks, no MCP probing.
+7. **Confirm before writing declared values.** Free-form input + direct mutation is a trust boundary.
 
 ## When to write into which
 
@@ -145,54 +169,54 @@ Auto-switch trigger:
 | Domain skill logging a choice | `fstack-observe log <dim> <sig> --annotation "..."` |
 | Sub-skill emitting a contextual note (no signal) | `fstack-observe annotate "..."` |
 | New manual subprofile | `fstack-profile create <key>` |
-| Clustering output | (automatic, do not touch from skills) |
+| Clustering output | automatic — never written from skills |
 
 ## Voice (for fstack itself)
 
 Skills are instructions for Claude. Read like a senior eng leaving notes for another senior eng.
 
-- Short. Direct. Numbered lists for steps.
+- Short. Direct. Numbered lists.
 - No em dashes. No AI vocab.
-- Imperatives: "Read X. Write Y." not "Your job is to read X."
+- Imperatives: "Read X. Write Y."
 - When auto-switching subprofile, say so in one line, don't apologize, don't ask.
 
 ## Migration policy
 
-`_maybe_migrate` runs on every read after `exists`. Each version step is idempotent and additive — no destructive changes to fields that exist.
+`_maybe_migrate` runs on every read after `exists`. Idempotent + additive.
 
 Order:
 
-1. `_migrate_v02`: wrap flat profile into subprofiles. Detect by `profile.subprofiles == null`.
-2. `_migrate_v03`: add pinned/auto_switch/origin/examples/cluster_meta. Detect by `profile.auto_switch == null`. Consolidate per-subprofile observation logs.
+1. `_migrate_v02`: wrap flat profile into subprofiles.
+2. `_migrate_v03`: add pinned/auto_switch/origin/examples. Consolidate per-subprofile logs.
+3. `_migrate_v04`: drop time-based `<repo>-<band>` inferred subprofiles (wrong cluster axis). Re-cluster runs on next `/fstack`.
 
-Future steps follow the same pattern.
+Future steps follow same pattern: detect by missing field or version mismatch, rewrite atomically, log to stderr.
 
-## Smoke test
+## Smoke test (behavior-first)
 
 ```bash
 B=/Users/eliot/Workspaces/fstack/bin
-
-# Seed synthetic observations across two contexts
 mkdir -p ~/.fstack/observations
+# Three behavior patterns; same repo (acme) appears in two
 cat > ~/.fstack/observations/sessions.jsonl <<'EOF'
-{"ts":"2026-05-25T14:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"architecture_care","signal":0.85,"weight":1,"annotation":"API with strict schema","context":{"repo":"acme","hour":14}}
-{"ts":"2026-05-25T15:00:00Z","profile_at_log":"default","skill":"fstack-schema","dimension":"test_rigor","signal":0.8,"weight":1,"annotation":"Migration with FK","context":{"repo":"acme","hour":15}}
-{"ts":"2026-05-25T16:00:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"scope_appetite","signal":0.3,"weight":1,"annotation":"Smaller scaffold","context":{"repo":"acme","hour":16}}
-{"ts":"2026-05-28T23:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"risk_tolerance","signal":0.9,"weight":1,"annotation":"Quick endpoint, no validation","context":{"repo":"side","hour":23}}
-{"ts":"2026-05-29T01:00:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"test_rigor","signal":0.15,"weight":1,"annotation":"No tests, just see if it works","context":{"repo":"side","hour":1}}
-{"ts":"2026-05-29T01:30:00Z","profile_at_log":"default","skill":"fstack-schema","dimension":"architecture_care","signal":0.2,"weight":1,"annotation":"SQLite, denormalized","context":{"repo":"side","hour":1}}
+{"ts":"2026-05-20T14:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"risk_tolerance","signal":0.2,"weight":1,"annotation":"strict validation","context":{"repo":"acme","branch":"main","hour":14}}
+{"ts":"2026-05-21T10:00:00Z","profile_at_log":"default","skill":"fstack-schema","dimension":"architecture_care","signal":0.85,"weight":1,"annotation":"FK + cascade","context":{"repo":"acme","branch":"main","hour":10}}
+{"ts":"2026-05-22T15:00:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"test_rigor","signal":0.8,"weight":1,"annotation":"full e2e","context":{"repo":"acme","branch":"main","hour":15}}
+{"ts":"2026-05-24T16:00:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"risk_tolerance","signal":0.85,"weight":1,"annotation":"trying new arch","context":{"repo":"acme","branch":"spike-routing","hour":16}}
+{"ts":"2026-05-24T16:30:00Z","profile_at_log":"default","skill":"fstack-scaffold","dimension":"bias_for_action","signal":0.9,"weight":1,"annotation":"ship + iterate","context":{"repo":"acme","branch":"spike-routing","hour":16}}
+{"ts":"2026-05-25T15:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"scope_appetite","signal":0.85,"weight":1,"annotation":"3 patterns","context":{"repo":"acme","branch":"spike-auth","hour":15}}
+{"ts":"2026-05-22T23:00:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"test_rigor","signal":0.15,"weight":1,"annotation":"no tests","context":{"repo":"voice","branch":"main","hour":23}}
+{"ts":"2026-05-23T23:30:00Z","profile_at_log":"default","skill":"fstack-schema","dimension":"architecture_care","signal":0.2,"weight":1,"annotation":"sqlite denormalized","context":{"repo":"voice","branch":"main","hour":23}}
+{"ts":"2026-05-23T23:45:00Z","profile_at_log":"default","skill":"fstack-api","dimension":"risk_tolerance","signal":0.8,"weight":1,"annotation":"throw together","context":{"repo":"voice","branch":"main","hour":23}}
 EOF
-
-$B/fstack-cluster cluster
-$B/fstack-profile list             # two inferred should appear
-$B/fstack-cluster match --repo acme --hour 14         # acme-afternoon
-$B/fstack-cluster match --repo side --hour 1          # side-late-night
-$B/fstack-profile pin acme-afternoon
-$B/fstack-profile list             # [pinned] shown
-$B/fstack-profile unpin
+$B/fstack-cluster cluster --threshold 3
+$B/fstack-profile list
+# Expect: rigorous-steady (production) AND loose-bold (move-fast) AND loose-* for voice
+$B/fstack-cluster match --repo acme --branch main --hour 14
+# rigorous-steady
+$B/fstack-cluster match --repo acme --branch spike-foo --hour 16
+# loose-bold
 ```
-
-Real test: invoke `/fstack` in a fresh session in any git repo — preamble should announce active and switch if context matches a cluster.
 
 ## Don't
 
@@ -201,5 +225,6 @@ Real test: invoke `/fstack` in a fresh session in any git repo — preamble shou
 - Don't depend on gstack.
 - Don't grow beyond ~7 skills in v0.x.
 - Don't let clustering overwrite manual subprofiles.
+- Don't put context (repo, branch, hour) into the cluster key; that was the v0.3 mistake.
 - Don't switch silently — always print the SWITCHED line.
-- Don't add comments to skill bodies explaining what each step does.
+- Don't add comments to skill bodies.

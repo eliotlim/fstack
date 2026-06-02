@@ -248,6 +248,7 @@ case "$cmd" in
     key="$(_resolve_key "${1:-}")"
     _assert_exists "$key"
     active="$(jq -r '.profile.active' "$CONFIG_FILE")"
+    origin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].origin // "manual"' "$CONFIG_FILE")"
     risk="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.risk_tolerance // empty' "$CONFIG_FILE")"
     action="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.bias_for_action // empty' "$CONFIG_FILE")"
     scope="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.scope_appetite // empty' "$CONFIG_FILE")"
@@ -259,9 +260,9 @@ case "$cmd" in
     samples="$(jq -r --arg k "$key" '.profile.subprofiles[$k].inferred.sample_count // 0' "$CONFIG_FILE")"
 
     if [ "$key" = "$active" ]; then
-      echo "SUBPROFILE: $key (active) — $label"
+      echo "SUBPROFILE: $key ($origin, active) — $label"
     else
-      echo "SUBPROFILE: $key — $label"
+      echo "SUBPROFILE: $key ($origin) — $label"
     fi
     [ -n "$desc" ] && echo "  $desc"
     echo ""
@@ -271,6 +272,23 @@ case "$cmd" in
     printf "  scope_appetite:    %s (%s)\n" "${scope:-unset}" "$(_band "${scope:-0.5}" lean balanced ambitious)"
     printf "  test_rigor:        %s (%s)\n" "${rigor:-unset}" "$(_band "${rigor:-0.5}" happy-path balanced full-coverage)"
     printf "  architecture_care: %s (%s)\n" "${arch:-unset}" "$(_band "${arch:-0.5}" pragmatic balanced principled)"
+
+    if [ "$origin" = "inferred" ]; then
+      echo ""
+      echo "SEEN IN"
+      jq -r --arg k "$key" '
+        .profile.subprofiles[$k].context_distribution
+        | to_entries
+        | sort_by(-.value)
+        | .[0:5]
+        | .[]
+        | "  \(.key)  (\(.value))"
+      ' "$CONFIG_FILE"
+      echo ""
+      echo "EXAMPLES"
+      jq -r --arg k "$key" '.profile.subprofiles[$k].examples[]? | "  - \(.)"' "$CONFIG_FILE"
+    fi
+
     echo ""
     echo "PREFERENCES"
     jq -r --arg k "$key" '.profile.subprofiles[$k].preferences | to_entries | .[] | "  \(.key): \(.value // "unset")"' "$CONFIG_FILE"
