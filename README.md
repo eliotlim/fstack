@@ -4,9 +4,9 @@ Full-stack skills framework for those who build. Pairs with [gstack](https://git
 
 fstack profiles how you work and what you build with, then shapes recommendations across scaffolding, API design, and schema work to match.
 
-You're not one developer. **You have archetypes.** Production work is deliberate and balanced. A spike is fluid and ambitious. A late-night side project is fluid and focused. None of these is "better" than the others. fstack notices which archetype your current work fits and switches accordingly.
+You're not one developer. **You have archetypes.** Production work is deliberate and balanced. A spike is fluid and ambitious. A late-night side project is fluid and focused. None of these is "better" than the others. fstack notices which archetype your current work fits and suggests a switch when you cross a context boundary.
 
-The archetype is the identity. `(repo, branch)` is just where it shows up — the same archetype can span many repos and many branches.
+The archetype is the identity. `(repo, branch)` is just where it shows up. The same archetype can span many repos and many branches.
 
 ## Install
 
@@ -25,13 +25,13 @@ After install, open a new Claude Code session and type `/fstack`.
 
 | Skill | Does |
 |-------|------|
-| `/fstack` | Router + setup. Auto-clusters and auto-switches archetype per context. |
+| `/fstack` | Router + setup. Auto-clusters and suggests an archetype switch when context changes. |
 | `/fstack-profile` | Show, edit, switch, pin archetypes. |
 | `/fstack-stack` | Declare tech stack on the active subprofile. |
 | `/fstack-skill` | Make your own skills. |
-| `/fstack-scaffold` | Scaffold a feature. Logs annotated observations. |
-| `/fstack-api` | Stub an endpoint. Logs annotated observations. |
-| `/fstack-schema` | Model + migration. Logs annotated observations. |
+| `/fstack-scaffold` | Scaffold a feature. Shows calibration. Logs annotated observations. |
+| `/fstack-api` | Stub an endpoint. Shows calibration. Logs annotated observations. |
+| `/fstack-schema` | Model + migration. Shows calibration. Logs annotated observations. |
 
 ## Seven dimensions
 
@@ -39,15 +39,13 @@ Each dimension is a spectrum between two legitimate working styles. Pick where y
 
 | Dimension | Low end | High end |
 |-----------|---------|----------|
-| `risk_tolerance` | cautious, measured | bold, experimental |
-| `bias_for_action` | deliberate, plan-first | action-oriented, shipping |
-| `scope_appetite` | focused, narrow | ambitious, comprehensive |
-| `test_rigor` | lean, streamlined | rigorous, thorough |
-| `architecture_care` | pragmatic, direct | principled, structured |
-| `detail_preference` | terse, signal-heavy | thorough, explanatory |
-| `autonomy` | collaborative, consultative | autonomous, self-directed |
-
-The last two are imported from gstack's psychographic. They fit full-stack work — different archetypes call for different communication density and different levels of delegation.
+| `risk_tolerance` | stability | speed |
+| `bias_for_action` | deliberate | action |
+| `scope_appetite` | focused | ambitious |
+| `test_rigor` | lean | rigorous |
+| `architecture_care` | pragmatic | principled |
+| `detail_preference` | detail-oriented | big-picture |
+| `autonomy` | seek-permission | ask-forgiveness |
 
 ## Archetypes
 
@@ -80,7 +78,7 @@ ARCHETYPE: production (inferred, active)
   deliberate x balanced
 
 DIMENSIONS
-  risk_tolerance:    0.18 (cautious)
+  risk_tolerance:    0.18 (stability)
   test_rigor:        0.83 (rigorous)
   architecture_care: 0.88 (principled)
   ...
@@ -96,26 +94,39 @@ EXAMPLES
   - full integration tests
 ```
 
-## Auto-switch
+## Auto-suggest
 
 `/fstack` preamble:
 
 1. Re-cluster if stale (> 24h) and there are new observations.
 2. Read current context: `(repo, branch_norm, hour)`.
 3. Tiered lookup against each archetype's `context_distribution`:
-   - exact match `<repo>:<branch_norm> @ <band>`
+   - exact match `<repo>:<branch_norm> @ <band>` (adjacent bands score 0.5)
    - same repo + branch
    - same repo
-4. Pick the highest-scoring archetype. Empty if nothing matches.
-5. Switch if match differs from active, `auto_switch == true`, and `pinned == null`.
+4. Pick the highest-scoring archetype.
+5. If match differs from active and `auto_suggest == true` and `pinned == null`, print:
+   `SUGGEST: production (matches acme:main, current default)`
+6. /fstack asks via AskUserQuestion: switch / keep / pin current. fstack only switches when you say yes.
 
-Print one line: `SWITCHED: default -> production (matched on acme:main @ afternoon)`.
+## Show calibration
+
+Every domain skill prints a `CALIBRATION` block before proposing:
+
+```
+CALIBRATION (production):
+  risk_tolerance       0.20  (stability)
+  architecture_care    0.85  (principled)
+  test_rigor           0.80  (rigorous)
+```
+
+The proposal then restates the calibration on one line so it's clear which archetype shaped the output.
 
 ## Overrides
 
 - `/fstack-profile pin <archetype>` (or just `pin` for current) locks the active subprofile.
 - `/fstack-profile unpin` clears.
-- `fstack-config set profile.auto_switch false` disables entirely.
+- `fstack-config set profile.auto_suggest false` disables suggestions entirely.
 - `/fstack-profile create <name>` creates a manual subprofile. Manual names that collide with archetype names take precedence (clustering skips them).
 
 ## Config
@@ -126,16 +137,17 @@ Print one line: `SWITCHED: default -> production (matched on acme:main @ afterno
 ~/.fstack-bin/fstack-config show | jq
 ```
 
-Schema (v0.5.0):
+Schema (v0.6.0):
 
 ```json
 {
-  "version": "0.5.0",
+  "version": "0.6.0",
+  "last_migrated_version": "0.6.0",
   "install": { "mode": "dev|prod", "...": "..." },
   "profile": {
     "active": "<archetype-or-manual-key>",
     "pinned": "<key>|null",
-    "auto_switch": true,
+    "auto_suggest": true,
     "last_cluster_at": "...",
     "subprofiles": {
       "<key>": {
@@ -157,7 +169,7 @@ Schema (v0.5.0):
         "examples":    [],
         "context_distribution": { "<repo>:<branch_norm> @ <band>": count },
         "cluster_meta": {
-          "method": "behavior-2d-v3",
+          "method": "behavior-2d-v0.6.0",
           "archetype": "production",
           "bin_key": "deliberate-balanced",
           "discipline_bin": "deliberate",
@@ -180,6 +192,8 @@ Schema (v0.5.0):
 
 Observations: `~/.fstack/observations/sessions.jsonl`. One JSONL stream.
 
+Corrections: `fstack-observe forget --since YYYY-MM-DD --skill X --dim Y --repo Z`. At least one filter required.
+
 ## Migration
 
 Auto. First read of an old config upgrades:
@@ -188,8 +202,9 @@ Auto. First read of an old config upgrades:
 - v0.2 → v0.3: add `pinned`, `auto_switch`. Mark existing subprofiles `origin: "manual"`. Consolidate observation logs.
 - v0.3 → v0.4: drop time-keyed inferred subprofiles; behavior-first re-cluster on next `/fstack`.
 - v0.4 → v0.5: add `detail_preference` + `autonomy` dimensions. Drop inferred subprofiles (key format moved from bin-name to archetype-name). Re-cluster.
+- v0.5 → v0.6: `auto_switch` → `auto_suggest` (silent flip becomes ask-before-switch). Dim endpoint labels updated. Re-cluster.
 
-Manual subprofiles preserved at every step.
+Manual subprofiles preserved at every step. Migrations stamp `last_migrated_version` so they only run once per upgrade.
 
 ## Custom skills
 

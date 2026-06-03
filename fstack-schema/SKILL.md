@@ -1,7 +1,7 @@
 ---
 name: fstack-schema
-version: 0.1.0
-description: Design a data model and migration honoring chosen ORM and DB. Tunes normalization, indexes, constraints to architecture_care and scope_appetite.
+version: 0.6.0
+description: Design a data model and migration honoring chosen ORM and DB. Tunes normalization, indexes, constraints to the active subprofile.
 allowed-tools:
   - Bash
   - Read
@@ -23,7 +23,7 @@ triggers:
 
 1. Get the change in one line.
 2. Detect ORM + DB.
-3. Calibrate from profile.
+3. Calibrate from profile (visible).
 4. Propose.
 5. Write. Update generated types. Log.
 
@@ -37,11 +37,10 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
-echo "PROFILE:"
-"$_FSTACK_BIN/fstack-profile" dimensions
+"$_FSTACK_BIN/fstack-profile" calibrate schema
 echo "STACK:"
-"$_FSTACK_BIN/fstack-config" get stack.database
-"$_FSTACK_BIN/fstack-config" get stack.orm
+"$_FSTACK_BIN/fstack-config" get-active stack.database
+"$_FSTACK_BIN/fstack-config" get-active stack.orm
 ```
 
 ## 1. What's the change?
@@ -70,18 +69,28 @@ DB: check `DATABASE_URL`, `docker-compose.yml`, ORM config.
 
 Conflict with declared stack? Ask: declared / detected / tell me.
 
-## 3. Calibrate
+## 3. Calibrate (visible)
+
+Print the calibration block, then map.
+
+```
+CALIBRATION (production):
+  architecture_care    0.85  (principled)
+  scope_appetite       0.60  (balanced)
+  risk_tolerance       0.20  (stability)
+  test_rigor           0.80  (rigorous)
+```
 
 | Dim | Effect |
 |-----|--------|
-| `architecture_care` low | one table, PK only, no indexes |
-| `architecture_care` mid | FKs, NOT NULL on important cols, basic indexes |
-| `architecture_care` high | normalized, ON DELETE policies, partial + composite indexes, check constraints, timestamps, soft-delete |
-| `scope_appetite` low | only what was asked |
-| `scope_appetite` high | add helpers: `created_at`, `updated_at`, `deleted_at`, slug |
-| `risk_tolerance` low | reversible migrations only |
-| `risk_tolerance` high | one-way OK |
-| `test_rigor` high | add seed/fixture |
+| `architecture_care` pragmatic | one table, PK only, no indexes |
+| `architecture_care` balanced | FKs, NOT NULL on important cols, basic indexes |
+| `architecture_care` principled | normalized, ON DELETE policies, partial + composite indexes, check constraints, timestamps, soft-delete |
+| `scope_appetite` focused | only what was asked |
+| `scope_appetite` ambitious | add helpers: `created_at`, `updated_at`, `deleted_at`, slug |
+| `risk_tolerance` stability | reversible migrations only |
+| `risk_tolerance` speed | one-way OK |
+| `test_rigor` rigorous | add seed/fixture |
 
 "Just add X" beats declared profile.
 
@@ -96,9 +105,10 @@ Columns:
 Indexes:
   - <name> ON <table>(<cols>) [partial|unique]
 FKs:
-  - <table>.<col> → <other>.<col> [ON DELETE <policy>]
+  - <table>.<col> -> <other>.<col> [ON DELETE <policy>]
 Migration: <path>
 Reversibility: <fully|one-way>
+Calibration: <one-line restatement>
 ```
 
 AskUserQuestion: apply / change / cancel.
@@ -131,7 +141,7 @@ Then: `npx prisma migrate dev --name <slug>`.
 
 **Alembic:** write `alembic/versions/<rev>_<slug>.py` with `op.create_table(...)` and a real `downgrade()`.
 
-**Raw SQL:** write `migrations/<NNN>_<slug>.up.sql` + matching `.down.sql`. Skip down only if `risk_tolerance` is high AND the user opted in.
+**Raw SQL:** write `migrations/<NNN>_<slug>.up.sql` + matching `.down.sql`. Skip down only if `risk_tolerance` reads as speed AND the user opted in.
 
 ## 6. Propagate
 
@@ -144,8 +154,6 @@ Codegen after schema changes:
 Grep for typed queries on the changed table. List them. Ask before updating.
 
 ## 7. Log
-
-Annotations are short, concrete, human-readable. They feed clustering.
 
 ```bash
 "$_FSTACK_BIN/fstack-observe" log architecture_care <signal> --skill fstack-schema \
@@ -167,6 +175,7 @@ Good annotations: "teams table in Drizzle: FK + ON DELETE CASCADE + slug index",
   ORM: <orm>  DB: <db>
   Migration: <path>
   Reversibility: <fully|one-way>
+  Calibration: <archetype> · <dim>=<band> · ...
   Next: <run migrate | review diff>
 ```
 
@@ -174,4 +183,4 @@ Touches prod data (rename, drop)? Flag it.
 
 ## Voice
 
-Concrete column lists, not "the data model". Reversibility line always. Match ORM idioms.
+Concrete column lists, not "the data model". Reversibility line always. Match ORM idioms. Show calibration up front so the proposal isn't a black box.

@@ -1,6 +1,6 @@
 ---
 name: fstack-profile
-version: 0.5.0
+version: 0.6.0
 description: Inspect, edit, and switch fstack archetypes. Archetypes are behavior-derived (production, sprint, exploration, etc.) and reference repo/branch combinations via context_distribution.
 allowed-tools:
   - Bash
@@ -25,13 +25,15 @@ Writes target the active subprofile. To affect a different one, switch first.
 
 Seven dimensions at `developer.*`. Both ends of each spectrum are legitimate working styles; pick where the user actually lives, not where you think is "best."
 
-- `risk_tolerance` (0 cautious, 1 bold)
-- `bias_for_action` (0 deliberate, 1 action-oriented)
-- `scope_appetite` (0 focused, 1 ambitious)
-- `test_rigor` (0 lean, 1 rigorous)
-- `architecture_care` (0 pragmatic, 1 principled)
-- `detail_preference` (0 terse, 1 thorough)
-- `autonomy` (0 collaborative, 1 autonomous)
+| Key | Low end | High end |
+|-----|---------|----------|
+| `risk_tolerance` | stability | speed |
+| `bias_for_action` | deliberate | action |
+| `scope_appetite` | focused | ambitious |
+| `test_rigor` | lean | rigorous |
+| `architecture_care` | pragmatic | principled |
+| `detail_preference` | detail-oriented | big-picture |
+| `autonomy` | seek-permission | ask-forgiveness |
 
 Five preferences at `preferences.*`:
 
@@ -111,7 +113,7 @@ Ask:
 
 1. **Key** (slug, kebab-case). Validate.
 2. **Label** (free text, defaults to key).
-3. **Description** (one line, optional but helpful).
+3. **Description** (one line, optional).
 4. **Walk setup now or leave unset?**
 
 ```bash
@@ -150,10 +152,10 @@ Cannot remove the last subprofile (binary enforces). Confirm via AskUserQuestion
 
 ## 8. Edit a dimension (writes to active)
 
-Map phrasing. Both directions are normal moves; don't assume "up" is improvement.
+Map phrasing. Both directions are normal working styles; don't assume one end is improvement.
 
-- more cautious / measured → `risk_tolerance` down
-- more bold / experimental → `risk_tolerance` up
+- more stable / less risky → `risk_tolerance` down
+- faster / less risk-averse → `risk_tolerance` up
 - more deliberate / plan more → `bias_for_action` down
 - more action / ship more → `bias_for_action` up
 - more focused / smaller scope → `scope_appetite` down
@@ -162,10 +164,10 @@ Map phrasing. Both directions are normal moves; don't assume "up" is improvement
 - leaner tests → `test_rigor` down
 - more principled / structured → `architecture_care` up
 - more pragmatic / direct → `architecture_care` down
-- terser → `detail_preference` down
-- more thorough explanations → `detail_preference` up
-- more collaborative / consult more → `autonomy` down
-- more autonomous / delegate more → `autonomy` up
+- more detail-oriented → `detail_preference` down
+- more big-picture → `detail_preference` up
+- seek permission more / consult → `autonomy` down
+- ask forgiveness more / delegate → `autonomy` up
 
 Read current. Compute new (delta ±0.2, clamp 0..1, or use explicit number).
 
@@ -219,4 +221,4 @@ Invoke `/fstack` to re-declare.
 
 ## Voice
 
-Confirm before mutating declared values. Writes default to **active** — the user has to switch first to edit a different subprofile.
+Confirm before mutating declared values. Writes default to **active**. The user has to switch first to edit a different subprofile.

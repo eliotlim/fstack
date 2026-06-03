@@ -1,6 +1,6 @@
 ---
 name: fstack-skill
-version: 0.1.0
+version: 0.6.0
 description: Create, list, edit, and remove the user's own custom fstack skills. Codify personal patterns into slash commands.
 allowed-tools:
   - Bash

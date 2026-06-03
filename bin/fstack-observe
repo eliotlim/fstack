@@ -9,14 +9,16 @@
 #   fstack-observe log <dim> <signal> [--weight N] [--skill X]
 #                                     [--annotation "short text"]
 #                                     [--note "older key, still accepted"]
-#   fstack-observe annotate <text> [--skill X]  # text-only entry, no dimension
-#   fstack-observe rollup [--profile <key>]      # roll active or specific subprofile
+#   fstack-observe annotate <text> [--skill X]
+#   fstack-observe rollup [--profile <key>]
 #   fstack-observe show [--limit N] [--profile <key>]
 #   fstack-observe gap [--profile <key>]
-#   fstack-observe path                          # prints sessions.jsonl path
+#   fstack-observe forget [--since YYYY-MM-DD] [--skill X] [--dim X] [--repo X]
+#   fstack-observe path
 #
-# Dimensions: risk_tolerance, bias_for_action, scope_appetite, test_rigor, architecture_care.
-# Signal 0..1 where 0 = low (cautious / lean / happy-path), 1 = high.
+# Dimensions: risk_tolerance, bias_for_action, scope_appetite, test_rigor,
+#             architecture_care, detail_preference, autonomy.
+# Signal 0..1.
 
 set -euo pipefail
 
@@ -45,7 +47,6 @@ _atomic_write() {
 _active() { jq -r '.profile.active' "$CONFIG_FILE"; }
 _resolve_key() { [ -z "${1:-}" ] && _active || echo "$1"; }
 
-# Capture context once per log call
 _context_json() {
   local repo branch cwd hour weekday
   repo="$(git rev-parse --show-toplevel 2>/dev/null | tr -d '\n' | awk -F/ '{print $NF}')"
@@ -64,6 +65,25 @@ _context_json() {
       weekday: $weekday
     }'
 }
+
+# Shared jq helpers for branch_norm + band (matches fstack-cluster).
+_jq_helpers='
+  def branch_norm:
+    if . == null or . == "" then "?"
+    elif (. == "main" or . == "master" or . == "develop" or . == "trunk") then "main"
+    elif test("^(spike|exp|experiment)([/-]|$)") then "spike"
+    elif test("^(feature|feat)([/-]|$)") then "feature"
+    elif test("^(fix|bugfix|hotfix)([/-]|$)") then "fix"
+    elif test("^(release|rc)([/-]|$)") then "release"
+    elif test("^(chore|refactor)([/-]|$)") then "chore"
+    else "other" end;
+  def band:
+    if . == null then "unknown"
+    elif (. < 6 or . >= 22) then "late-night"
+    elif . < 12 then "morning"
+    elif . < 18 then "afternoon"
+    else "evening" end;
+'
 
 cmd="${1:-}"
 shift || true
@@ -127,15 +147,16 @@ case "$cmd" in
     done
     key="$(_resolve_key "$profile")"
     [ -f "$SESSIONS" ] || { echo "no observations yet"; exit 0; }
-    # For a manual subprofile, filter sessions by profile_at_log.
-    # For inferred, prefer cluster_meta scope (repo + hour_band).
     origin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].origin // "manual"' "$CONFIG_FILE")"
     if [ "$origin" = "inferred" ]; then
-      repo="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.repo // ""' "$CONFIG_FILE")"
-      band="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.hour_band // ""' "$CONFIG_FILE")"
-      filter='def band: if . == null then "unknown" elif (. < 6 or . >= 22) then "late-night" elif . < 12 then "morning" elif . < 18 then "afternoon" else "evening" end;
-        [.[] | select(.dimension != null) | select((.context.repo // "unknown") == $repo and (.context.hour | band) == $band)]'
-      filtered="$(jq -s --arg repo "$repo" --arg band "$band" "$filter" "$SESSIONS")"
+      ctx_keys="$(jq -c --arg k "$key" '.profile.subprofiles[$k].context_distribution // {} | keys' "$CONFIG_FILE")"
+      filter="$_jq_helpers"'
+        [.[]
+          | select(.dimension != null)
+          | ((.context.repo // "unknown") + ":" + ((.context.branch // "") | branch_norm) + " @ " + ((.context.hour // 12) | band)) as $k
+          | select($keys | index($k))
+        ]'
+      filtered="$(jq -s --argjson keys "$ctx_keys" "$filter" "$SESSIONS")"
     else
       filtered="$(jq -s --arg k "$key" '[.[] | select(.profile_at_log == $k) | select(.dimension != null)]' "$SESSIONS")"
     fi
@@ -206,8 +227,40 @@ case "$cmd" in
     ' "$CONFIG_FILE"
     ;;
 
+  forget)
+    [ -f "$SESSIONS" ] || { echo "no observations yet"; exit 0; }
+    since=""; skill=""; dim=""; repo=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --since) since="$2"; shift 2;;
+        --skill) skill="$2"; shift 2;;
+        --dim) dim="$2"; shift 2;;
+        --repo) repo="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    if [ -z "$since" ] && [ -z "$skill" ] && [ -z "$dim" ] && [ -z "$repo" ]; then
+      echo "fstack-observe forget: refusing to drop everything; pass at least one filter (--since/--skill/--dim/--repo)" >&2
+      exit 2
+    fi
+    before="$(wc -l < "$SESSIONS" | tr -d ' ')"
+    tmp="$(mktemp "${SESSIONS}.XXXXXX")"
+    jq -c --arg since "$since" --arg skill "$skill" --arg dim "$dim" --arg repo "$repo" '
+      . as $e
+      | (($since == "") or ($e.ts >= $since)) as $match_since
+      | (($skill == "") or ($e.skill == $skill)) as $match_skill
+      | (($dim == "") or ($e.dimension == $dim)) as $match_dim
+      | (($repo == "") or (($e.context.repo // "") == $repo)) as $match_repo
+      | (($match_since and $match_skill and $match_dim and $match_repo) | not) as $keep
+      | select($keep)
+    ' "$SESSIONS" > "$tmp"
+    mv "$tmp" "$SESSIONS"
+    after="$(wc -l < "$SESSIONS" | tr -d ' ')"
+    echo "forgot $((before - after)) of $before observations (kept $after)"
+    ;;
+
   ""|help|-h|--help)
-    sed -n '2,20p' "$0"
+    sed -n '2,22p' "$0"
     ;;
 
   *)

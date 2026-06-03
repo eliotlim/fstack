@@ -2,17 +2,20 @@
 # fstack-profile: inspect and manage subprofiles
 #
 # Usage:
-#   fstack-profile show [<key>]            # active by default
+#   fstack-profile show [<key>]
 #   fstack-profile json [<key>]
 #   fstack-profile vibe [<key>]
 #   fstack-profile dimensions [<key>]
 #   fstack-profile stack [<key>]
-#   fstack-profile list                    # all subprofiles, compact
-#   fstack-profile use <key>               # switch active
-#   fstack-profile create <key> [--label <text>] [--description <text>] [--clone-from <existing>]
+#   fstack-profile list
+#   fstack-profile calibrate <skill> [<key>]   # print dim values for skill
+#   fstack-profile use <key>
+#   fstack-profile create <key> [--label X] [--description Y] [--clone-from Z]
 #   fstack-profile rename <old> <new>
-#   fstack-profile remove <key>            # cannot remove last
-#   fstack-profile active                  # prints active key
+#   fstack-profile remove <key>
+#   fstack-profile pin [<key>]
+#   fstack-profile unpin
+#   fstack-profile active
 
 set -euo pipefail
 
@@ -32,12 +35,22 @@ _atomic_write() {
   mv "$tmp" "$path"
 }
 
-_band() {
-  local v="$1" lo="$2" mi="$3" hi="$4"
+# Per-dim band labels (low | mid | high). New v0.6 endpoint labels.
+_band_label() {
+  local dim="$1" v="$2"
   if [ -z "$v" ] || [ "$v" = "null" ]; then echo "unset"; return; fi
-  awk -v v="$v" -v lo="$lo" -v mi="$mi" -v hi="$hi" 'BEGIN {
-    if (v < 0.35) print lo; else if (v < 0.65) print mi; else print hi
-  }'
+  local b
+  b="$(awk -v v="$v" 'BEGIN { if (v < 0.35) print "low"; else if (v < 0.65) print "mid"; else print "high" }')"
+  case "$dim" in
+    risk_tolerance)    case "$b" in low) echo "stability";; mid) echo "balanced";; high) echo "speed";; esac;;
+    bias_for_action)   case "$b" in low) echo "deliberate";; mid) echo "balanced";; high) echo "action";; esac;;
+    scope_appetite)    case "$b" in low) echo "focused";; mid) echo "balanced";; high) echo "ambitious";; esac;;
+    test_rigor)        case "$b" in low) echo "lean";; mid) echo "balanced";; high) echo "rigorous";; esac;;
+    architecture_care) case "$b" in low) echo "pragmatic";; mid) echo "balanced";; high) echo "principled";; esac;;
+    detail_preference) case "$b" in low) echo "detail-oriented";; mid) echo "balanced";; high) echo "big-picture";; esac;;
+    autonomy)          case "$b" in low) echo "seek-permission";; mid) echo "balanced";; high) echo "ask-forgiveness";; esac;;
+    *) echo "$b";;
+  esac
 }
 
 _resolve_key() {
@@ -54,6 +67,17 @@ _assert_exists() {
   local has
   has="$(jq -r --arg k "$k" '.profile.subprofiles | has($k)' "$CONFIG_FILE")"
   [ "$has" = "true" ] || { echo "fstack-profile: no subprofile '$k'" >&2; exit 1; }
+}
+
+# Dims a skill cares about, in display order.
+_skill_dims() {
+  case "$1" in
+    api)      echo "risk_tolerance architecture_care test_rigor";;
+    schema)   echo "architecture_care scope_appetite risk_tolerance test_rigor";;
+    scaffold) echo "scope_appetite test_rigor architecture_care bias_for_action risk_tolerance";;
+    stack)    echo "bias_for_action architecture_care risk_tolerance";;
+    *)        echo "risk_tolerance bias_for_action scope_appetite test_rigor architecture_care detail_preference autonomy";;
+  esac
 }
 
 cmd="${1:-show}"
@@ -87,8 +111,8 @@ case "$cmd" in
              "  " + .value.cluster_meta.discipline_bin + " x " + .value.cluster_meta.ambition_bin
            else "" end)
         + (if (.value.context_distribution // {}) | length > 0 then
-             "  — " + short_ctx(.value.context_distribution)
-           elif .value.description then " — \(.value.description)"
+             "  on " + short_ctx(.value.context_distribution)
+           elif .value.description then ": \(.value.description)"
            else "" end)
     ' "$CONFIG_FILE"
     ;;
@@ -96,13 +120,12 @@ case "$cmd" in
   pin)
     key="${1:-}"
     if [ -z "$key" ]; then
-      # Pin current active
       key="$(jq -r '.profile.active' "$CONFIG_FILE")"
     fi
     _assert_exists "$key"
     new="$(jq --arg k "$key" '.profile.pinned = $k' "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
-    echo "pinned: $key (auto-switch disabled while pinned)"
+    echo "pinned: $key (auto-suggest disabled while pinned)"
     ;;
 
   unpin)
@@ -111,17 +134,9 @@ case "$cmd" in
     echo "unpinned"
     ;;
 
-  cluster)
-    "$BIN_DIR/fstack-cluster" cluster "$@"
-    ;;
-
-  match)
-    "$BIN_DIR/fstack-cluster" match "$@"
-    ;;
-
-  status)
-    "$BIN_DIR/fstack-cluster" status
-    ;;
+  cluster) "$BIN_DIR/fstack-cluster" cluster "$@" ;;
+  match)   "$BIN_DIR/fstack-cluster" match "$@" ;;
+  status)  "$BIN_DIR/fstack-cluster" status ;;
 
   use)
     key="${1:-}"; [ -z "$key" ] && { echo "usage: fstack-profile use <key>" >&2; exit 2; }
@@ -166,10 +181,14 @@ case "$cmd" in
         '.profile.subprofiles[$k] = {
             label: $lbl,
             description: (if $desc == "" then null else $desc end),
-            developer: {risk_tolerance:null, bias_for_action:null, scope_appetite:null, test_rigor:null, architecture_care:null},
+            origin: "manual",
+            developer: {risk_tolerance:null, bias_for_action:null, scope_appetite:null, test_rigor:null, architecture_care:null, detail_preference:null, autonomy:null},
             preferences: {code_style:null, comment_level:null, abstraction:null, error_handling:null, type_safety:null},
             stack: {language:[], runtime:[], frontend:[], ui:[], backend_framework:[], database:[], orm:[], auth:[], deploy:[], testing:[], declared_at:null},
             inferred: {sample_count:0, rolling:{}, last_observation_at:null},
+            examples: [],
+            context_distribution: {},
+            cluster_meta: null,
             declared_at: null,
             created_at: $now,
             last_used_at: null
@@ -193,11 +212,6 @@ case "$cmd" in
        | if .profile.active == $old then .profile.active = $new else . end' \
       "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$updated"
-    # Rename observation log too
-    if [ -f "${FSTACK_HOME:-$HOME/.fstack}/observations/$old.jsonl" ]; then
-      mv "${FSTACK_HOME:-$HOME/.fstack}/observations/$old.jsonl" \
-         "${FSTACK_HOME:-$HOME/.fstack}/observations/$new.jsonl"
-    fi
     echo "renamed: $old -> $new"
     ;;
 
@@ -212,7 +226,6 @@ case "$cmd" in
        | if .profile.active == $k then .profile.active = (.profile.subprofiles | keys[0]) else . end' \
       "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
-    rm -f "${FSTACK_HOME:-$HOME/.fstack}/observations/$key.jsonl"
     [ "$active" = "$key" ] && echo "removed: $key (active switched to $(jq -r '.profile.active' "$CONFIG_FILE"))" || echo "removed: $key"
     ;;
 
@@ -239,22 +252,36 @@ case "$cmd" in
     ' "$CONFIG_FILE"
     ;;
 
+  calibrate)
+    skill_name="${1:-}"; [ -z "$skill_name" ] && { echo "usage: fstack-profile calibrate <skill> [<key>]" >&2; exit 2; }
+    key="$(_resolve_key "${2:-}")"
+    _assert_exists "$key"
+    pinned="$(jq -r '.profile.pinned // ""' "$CONFIG_FILE")"
+    suffix=""
+    [ -n "$pinned" ] && [ "$pinned" = "$key" ] && suffix=", pinned"
+    echo "CALIBRATION ($key$suffix):"
+    for d in $(_skill_dims "$skill_name"); do
+      v="$(jq -r --arg k "$key" --arg d "$d" '.profile.subprofiles[$k].developer[$d] // empty' "$CONFIG_FILE")"
+      lbl="$(_band_label "$d" "${v:-}")"
+      printf "  %-20s %-6s (%s)\n" "$d" "${v:-unset}" "$lbl"
+    done
+    ;;
+
   vibe)
     key="$(_resolve_key "${1:-}")"
     _assert_exists "$key"
-    risk="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.risk_tolerance // empty' "$CONFIG_FILE")"
-    action="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.bias_for_action // empty' "$CONFIG_FILE")"
-    scope="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.scope_appetite // empty' "$CONFIG_FILE")"
-    arch="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.architecture_care // empty' "$CONFIG_FILE")"
-    if [ -z "$risk$action$scope$arch" ]; then
+    parts=()
+    any="no"
+    for d in risk_tolerance bias_for_action scope_appetite test_rigor architecture_care detail_preference autonomy; do
+      v="$(jq -r --arg k "$key" --arg d "$d" '.profile.subprofiles[$k].developer[$d] // empty' "$CONFIG_FILE")"
+      [ -n "$v" ] && any="yes"
+      parts+=("$(_band_label "$d" "${v:-}")")
+    done
+    if [ "$any" = "no" ]; then
       echo "$key: unset"
       exit 0
     fi
-    risk_b="$(_band "${risk:-0.5}" cautious balanced bold)"
-    action_b="$(_band "${action:-0.5}" deliberate balanced action-oriented)"
-    scope_b="$(_band "${scope:-0.5}" focused balanced ambitious)"
-    arch_b="$(_band "${arch:-0.5}" pragmatic balanced principled)"
-    echo "$key: $risk_b · $action_b · $scope_b · $arch_b"
+    echo "$key: ${parts[0]} · ${parts[1]} · ${parts[2]} · ${parts[3]} · ${parts[4]} · ${parts[5]} · ${parts[6]}"
     ;;
 
   show|"")
@@ -262,13 +289,6 @@ case "$cmd" in
     _assert_exists "$key"
     active="$(jq -r '.profile.active' "$CONFIG_FILE")"
     origin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].origin // "manual"' "$CONFIG_FILE")"
-    risk="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.risk_tolerance // empty' "$CONFIG_FILE")"
-    action="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.bias_for_action // empty' "$CONFIG_FILE")"
-    scope="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.scope_appetite // empty' "$CONFIG_FILE")"
-    rigor="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.test_rigor // empty' "$CONFIG_FILE")"
-    arch="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.architecture_care // empty' "$CONFIG_FILE")"
-    detail="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.detail_preference // empty' "$CONFIG_FILE")"
-    auton="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.autonomy // empty' "$CONFIG_FILE")"
     label="$(jq -r --arg k "$key" '.profile.subprofiles[$k].label // $k' "$CONFIG_FILE")"
     desc="$(jq -r --arg k "$key" '.profile.subprofiles[$k].description // ""' "$CONFIG_FILE")"
     declared="$(jq -r --arg k "$key" '.profile.subprofiles[$k].declared_at // "never"' "$CONFIG_FILE")"
@@ -288,13 +308,11 @@ case "$cmd" in
     [ -n "$desc" ] && [ "$origin" = "manual" ] && echo "  $desc"
     echo ""
     echo "DIMENSIONS"
-    printf "  risk_tolerance:    %s (%s)\n" "${risk:-unset}" "$(_band "${risk:-0.5}" cautious balanced bold)"
-    printf "  bias_for_action:   %s (%s)\n" "${action:-unset}" "$(_band "${action:-0.5}" deliberate balanced action-oriented)"
-    printf "  scope_appetite:    %s (%s)\n" "${scope:-unset}" "$(_band "${scope:-0.5}" focused balanced ambitious)"
-    printf "  test_rigor:        %s (%s)\n" "${rigor:-unset}" "$(_band "${rigor:-0.5}" lean balanced rigorous)"
-    printf "  architecture_care: %s (%s)\n" "${arch:-unset}" "$(_band "${arch:-0.5}" pragmatic balanced principled)"
-    printf "  detail_preference: %s (%s)\n" "${detail:-unset}" "$(_band "${detail:-0.5}" terse balanced thorough)"
-    printf "  autonomy:          %s (%s)\n" "${auton:-unset}" "$(_band "${auton:-0.5}" collaborative balanced autonomous)"
+    for d in risk_tolerance bias_for_action scope_appetite test_rigor architecture_care detail_preference autonomy; do
+      v="$(jq -r --arg k "$key" --arg d "$d" '.profile.subprofiles[$k].developer[$d] // empty' "$CONFIG_FILE")"
+      lbl="$(_band_label "$d" "${v:-}")"
+      printf "  %-20s %-6s (%s)\n" "$d:" "${v:-unset}" "$lbl"
+    done
 
     if [ "$origin" = "inferred" ]; then
       echo ""

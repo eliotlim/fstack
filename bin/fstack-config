@@ -26,6 +26,8 @@ while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
 _script_dir="$(cd "$(dirname "$_self")" && pwd)"
 [ -f "$_script_dir/../config.template.json" ] && TEMPLATE_FILE="$(cd "$_script_dir/.." && pwd)/config.template.json"
 
+FSTACK_TARGET_VERSION="0.6.0"
+
 _require_jq() {
   command -v jq >/dev/null 2>&1 || { echo "fstack-config: jq is required (brew install jq)" >&2; exit 1; }
 }
@@ -81,7 +83,7 @@ _migrate_v02() {
 # v0.2 -> v0.3 (implicit clustering scaffold)
 _migrate_v03() {
   local needs
-  needs="$(jq -r 'if .profile.auto_switch == null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
+  needs="$(jq -r 'if .profile.auto_switch == null and .profile.auto_suggest == null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
   [ "$needs" = "yes" ] || return 0
   local now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -100,7 +102,6 @@ _migrate_v03() {
   ' "$CONFIG_FILE")"
   _atomic_write "$CONFIG_FILE" "$migrated"
 
-  # Consolidate per-subprofile observation logs into sessions.jsonl
   if [ -d "$CONFIG_DIR/observations" ] && [ ! -f "$CONFIG_DIR/observations/sessions.jsonl" ]; then
     local tmp_sessions
     tmp_sessions="$(mktemp)"
@@ -152,7 +153,7 @@ _migrate_v04() {
     | .profile.last_cluster_at = null
   ' "$CONFIG_FILE")"
   _atomic_write "$CONFIG_FILE" "$migrated"
-  echo "[fstack-config] migrated to v0.4.0 (dropped repo+band clusters; behavior-first re-cluster on next /fstack)" >&2
+  echo "[fstack-config] migrated to v0.4.0 (dropped repo+band clusters; re-cluster on next /fstack)" >&2
 }
 
 # v0.4 -> v0.5 (add detail_preference + autonomy; archetype-keyed inferred clusters)
@@ -171,19 +172,56 @@ _migrate_v05() {
     | .profile.last_cluster_at = null
   ' "$CONFIG_FILE")"
   _atomic_write "$CONFIG_FILE" "$migrated"
-  echo "[fstack-config] migrated to v0.5.0 (added detail_preference + autonomy; archetype-keyed clusters on next /fstack)" >&2
+  echo "[fstack-config] migrated to v0.5.0 (added detail_preference + autonomy)" >&2
+}
+
+# v0.5 -> v0.6 (auto_suggest replaces auto_switch; dim label rename; re-cluster)
+_migrate_v06() {
+  local needs
+  needs="$(jq -r 'if .version < "0.6.0" then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
+  [ "$needs" = "yes" ] || return 0
+  local migrated
+  migrated="$(jq '
+    .version = "0.6.0"
+    | .profile.auto_suggest = (
+        if .profile.auto_suggest != null then .profile.auto_suggest
+        elif .profile.auto_switch != null then .profile.auto_switch
+        else true end
+      )
+    | del(.profile.auto_switch)
+    | .profile.last_cluster_at = null
+  ' "$CONFIG_FILE")"
+  _atomic_write "$CONFIG_FILE" "$migrated"
+  echo "[fstack-config] migrated to v0.6.0 (auto_suggest replaces auto_switch; new dim labels; re-cluster on next /fstack)" >&2
 }
 
 _maybe_migrate() {
   [ -f "$CONFIG_FILE" ] || return 0
+  local last
+  last="$(jq -r '.last_migrated_version // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+  [ "$last" = "$FSTACK_TARGET_VERSION" ] && return 0
   _migrate_v02
   _migrate_v03
   _migrate_v04
   _migrate_v05
+  _migrate_v06
+  local stamped
+  stamped="$(jq --arg v "$FSTACK_TARGET_VERSION" '.last_migrated_version = $v' "$CONFIG_FILE" 2>/dev/null)"
+  [ -n "$stamped" ] && _atomic_write "$CONFIG_FILE" "$stamped"
 }
 
 _active_key() {
   jq -r '.profile.active // "default"' "$CONFIG_FILE"
+}
+
+# Auto-detect literal type: number, bool, null, or string.
+_set_path() {
+  local jq_filter="$1" val="$2"
+  if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
+    jq --arg p "$1" --argjson v "$val" "setpath(\$p | split(\".\"); \$v)" "$CONFIG_FILE"
+  else
+    jq --arg p "$1" --arg v "$val" "setpath(\$p | split(\".\"); \$v)" "$CONFIG_FILE"
+  fi
 }
 
 cmd="${1:-}"
@@ -202,9 +240,10 @@ case "$cmd" in
     [ -z "$TEMPLATE_FILE" ] || [ ! -f "$TEMPLATE_FILE" ] && { echo "fstack-config: template not found" >&2; exit 1; }
     source_path="${1:-}"
     installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    jq --arg sp "$source_path" --arg at "$installed_at" \
+    jq --arg sp "$source_path" --arg at "$installed_at" --arg v "$FSTACK_TARGET_VERSION" \
        '.install.source_path = $sp
         | .install.installed_at = $at
+        | .last_migrated_version = $v
         | .profile.subprofiles.default.created_at = $at
         | .profile.subprofiles.default.last_used_at = $at' \
        "$TEMPLATE_FILE" > "$CONFIG_FILE.tmp"
@@ -233,7 +272,7 @@ case "$cmd" in
     [ -z "$key" ] && { echo "usage: fstack-config get <dot.path>" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo ""; exit 0; }
     _maybe_migrate
-    jq -r ".$key // empty" "$CONFIG_FILE" 2>/dev/null || true
+    jq -r --arg p "$key" 'getpath($p | split(".")) // empty' "$CONFIG_FILE" 2>/dev/null || true
     ;;
   get-active)
     _require_jq
@@ -242,7 +281,9 @@ case "$cmd" in
     [ -f "$CONFIG_FILE" ] || { echo ""; exit 0; }
     _maybe_migrate
     active="$(_active_key)"
-    jq -r ".profile.subprofiles[\"$active\"].$sub // empty" "$CONFIG_FILE" 2>/dev/null || true
+    jq -r --arg a "$active" --arg p "$sub" '
+      getpath(["profile","subprofiles",$a] + ($p | split("."))) // empty
+    ' "$CONFIG_FILE" 2>/dev/null || true
     ;;
   set)
     _require_jq
@@ -250,13 +291,10 @@ case "$cmd" in
     [ -z "$key" ] && { echo "usage: fstack-config set <dot.path> <value>" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
     _maybe_migrate
-    jq_path=".$key"
-    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-      new="$(jq "$jq_path = ($val)" "$CONFIG_FILE")"
-    elif [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
-      new="$(jq "$jq_path = $val" "$CONFIG_FILE")"
+    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
+      new="$(jq --arg p "$key" --argjson v "$val" 'setpath($p | split("."); $v)' "$CONFIG_FILE")"
     else
-      new="$(jq --arg v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
+      new="$(jq --arg p "$key" --arg v "$val" 'setpath($p | split("."); $v)' "$CONFIG_FILE")"
     fi
     _atomic_write "$CONFIG_FILE" "$new"
     ;;
@@ -266,7 +304,7 @@ case "$cmd" in
     [ -z "$key" ] && { echo "usage: fstack-config set-json <dot.path> <json>" >&2; exit 2; }
     [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
     _maybe_migrate
-    new="$(jq --argjson v "$val" ".$key = \$v" "$CONFIG_FILE")"
+    new="$(jq --arg p "$key" --argjson v "$val" 'setpath($p | split("."); $v)' "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
     ;;
   set-active)
@@ -276,13 +314,12 @@ case "$cmd" in
     [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
     _maybe_migrate
     active="$(_active_key)"
-    jq_path=".profile.subprofiles[\"$active\"].$sub"
-    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
-      new="$(jq "$jq_path = ($val)" "$CONFIG_FILE")"
-    elif [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
-      new="$(jq "$jq_path = $val" "$CONFIG_FILE")"
+    if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || [ "$val" = "true" ] || [ "$val" = "false" ] || [ "$val" = "null" ]; then
+      new="$(jq --arg a "$active" --arg p "$sub" --argjson v "$val" \
+        'setpath(["profile","subprofiles",$a] + ($p | split(".")); $v)' "$CONFIG_FILE")"
     else
-      new="$(jq --arg v "$val" "$jq_path = \$v" "$CONFIG_FILE")"
+      new="$(jq --arg a "$active" --arg p "$sub" --arg v "$val" \
+        'setpath(["profile","subprofiles",$a] + ($p | split(".")); $v)' "$CONFIG_FILE")"
     fi
     _atomic_write "$CONFIG_FILE" "$new"
     ;;
@@ -293,7 +330,8 @@ case "$cmd" in
     [ -f "$CONFIG_FILE" ] || { echo "fstack-config: not initialized" >&2; exit 1; }
     _maybe_migrate
     active="$(_active_key)"
-    new="$(jq --argjson v "$val" ".profile.subprofiles[\"$active\"].$sub = \$v" "$CONFIG_FILE")"
+    new="$(jq --arg a "$active" --arg p "$sub" --argjson v "$val" \
+      'setpath(["profile","subprofiles",$a] + ($p | split(".")); $v)' "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
     ;;
   ""|help|-h|--help)

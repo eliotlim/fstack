@@ -1,5 +1,6 @@
 {
-  "version": "0.5.0",
+  "version": "0.6.0",
+  "last_migrated_version": "0.6.0",
   "install": {
     "mode": "dev",
     "install_path": "~/.claude/skills",
@@ -10,7 +11,7 @@
   "profile": {
     "active": "default",
     "pinned": null,
-    "auto_switch": true,
+    "auto_suggest": true,
     "last_cluster_at": null,
     "subprofiles": {
       "default": {

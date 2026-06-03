@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # fstack-cluster: derive inferred subprofiles from observed behavior.
 #
-# Behavior comes first. Observations roll up into sessions (repo + branch + date).
-# Each session is projected onto two axes:
-#   rigor    = avg of (1 - risk_tolerance), test_rigor, architecture_care
-#   appetite = avg of bias_for_action, scope_appetite
+# Behavior is the axis. Each (repo, branch_norm) work-context projects onto:
+#   discipline = avg of (1 - risk_tolerance, test_rigor, architecture_care)
+#   ambition   = avg of bias_for_action, scope_appetite
 # Both fall back to 0.5 when no relevant dimension was observed.
 #
-# Each axis is binned into low / mid / high. 3 x 3 = 9 cells. Cells with
-# >= threshold sessions become inferred subprofiles. Cluster key is
-# "<rigor_bin>-<appetite_bin>" (e.g. "rigorous-steady"). Label aliases below.
+# Each axis bins into low / mid / high. 9 cells, each named for an archetype.
+# Cells with >= threshold observations become inferred subprofiles keyed by
+# archetype name (exploration, sprint, production, etc.).
 #
-# Context (repo, hour_band) is descriptive, not a clustering axis. It feeds
-# context_distribution: a count of {<repo> @ <band>: count} used at match time.
+# Context (repo, branch_norm, hour_band) is descriptive, fed into
+# context_distribution and queried at match time. Match scores exact band 1.0
+# and adjacent bands 0.5 to smooth boundaries.
 #
 # Usage:
 #   fstack-cluster cluster [--threshold N] [--max-age-days N]
-#   fstack-cluster match [--repo R] [--hour H]
+#   fstack-cluster match [--repo R] [--branch B] [--hour H]
 #   fstack-cluster status
 
 set -euo pipefail
@@ -25,6 +25,9 @@ _self="${BASH_SOURCE[0]}"
 while [ -L "$_self" ]; do _self="$(readlink "$_self")"; done
 BIN_DIR="$(cd "$(dirname "$_self")" && pwd)"
 CONFIG="$BIN_DIR/fstack-config"
+REPO_ROOT="$(cd "$BIN_DIR/.." && pwd)"
+FSTACK_VERSION="$(cat "$REPO_ROOT/VERSION" 2>/dev/null || echo "0.6.0")"
+CLUSTER_METHOD="behavior-2d-v$FSTACK_VERSION"
 
 FSTACK_DIR="${FSTACK_HOME:-$HOME/.fstack}"
 SESSIONS="$FSTACK_DIR/observations/sessions.jsonl"
@@ -51,12 +54,37 @@ _band() {
   }'
 }
 
+# Returns two adjacent bands for hour-band smoothing.
+_band_neighbors() {
+  case "$1" in
+    late-night) echo "evening morning";;
+    morning)    echo "late-night afternoon";;
+    afternoon)  echo "morning evening";;
+    evening)    echo "afternoon late-night";;
+    *)          echo "";;
+  esac
+}
+
+_branch_norm() {
+  local b="${1:-}"
+  case "$b" in
+    ""|"?") echo "?";;
+    main|master|develop|trunk) echo "main";;
+    spike|exp|experiment|spike[-/]*|exp[-/]*|experiment[-/]*) echo "spike";;
+    feature|feat|feature[-/]*|feat[-/]*) echo "feature";;
+    fix|bugfix|hotfix|fix[-/]*|bugfix[-/]*|hotfix[-/]*) echo "fix";;
+    release|rc|release[-/]*|rc[-/]*) echo "release";;
+    chore|refactor|chore[-/]*|refactor[-/]*) echo "chore";;
+    *) echo "other";;
+  esac
+}
+
 cmd="${1:-cluster}"
 shift || true
 
 case "$cmd" in
   cluster)
-    threshold=3       # minimum observation count per cluster
+    threshold=3
     max_age_days=60
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -83,11 +111,11 @@ case "$cmd" in
       def branch_norm:
         if . == null or . == "" then "?"
         elif (. == "main" or . == "master" or . == "develop" or . == "trunk") then "main"
-        elif test("^(spike|exp|experiment)[/-]") then "spike"
-        elif test("^(feature|feat)[/-]") then "feature"
-        elif test("^(fix|bugfix|hotfix)[/-]") then "fix"
-        elif test("^(release|rc)[/-]") then "release"
-        elif test("^(chore|refactor)[/-]") then "chore"
+        elif test("^(spike|exp|experiment)([/-]|$)") then "spike"
+        elif test("^(feature|feat)([/-]|$)") then "feature"
+        elif test("^(fix|bugfix|hotfix)([/-]|$)") then "fix"
+        elif test("^(release|rc)([/-]|$)") then "release"
+        elif test("^(chore|refactor)([/-]|$)") then "chore"
         else "other" end;
       def archetype_for(bin_key):
         {"fluid-focused":"exploration",
@@ -100,10 +128,8 @@ case "$cmd" in
          "deliberate-balanced":"production",
          "deliberate-ambitious":"hardening"}[bin_key] // bin_key;
 
-      # 1) Filter, drop annotate-only entries
       map(select(.ts >= $cutoff and .dimension != null))
 
-      # 2) Aggregate per work-context = (repo, branch_norm)
       | map(. + {
           _repo: (.context.repo // "unknown"),
           _branch_norm: (.context.branch | branch_norm)
@@ -135,7 +161,6 @@ case "$cmd" in
           }
         )
 
-      # 3) Project each context to (discipline, ambition); 0.5 fallback if no relevant dim
       | map(. + {
           discipline: (
             [
@@ -154,7 +179,6 @@ case "$cmd" in
       | map(. + {bin_key: ((.discipline | dbin) + "-" + (.ambition | abin))})
       | map(. + {archetype: (archetype_for(.bin_key))})
 
-      # 4) Group contexts by 2-D cell, emit clusters keyed by archetype
       | group_by(.archetype)
       | map(
           {
@@ -192,10 +216,7 @@ case "$cmd" in
       | map(select(.observation_count >= $th))
     ' "$SESSIONS")"
 
-    # Apply clusters into config: keyed by archetype. Manual subprofiles preserved.
-    # A manual subprofile that happens to share an archetype name takes precedence
-    # (clustering skips it, prints a notice).
-    new="$(jq --argjson clusters "$clusters" --arg now "$now" '
+    new="$(jq --argjson clusters "$clusters" --arg now "$now" --arg method "$CLUSTER_METHOD" '
       def context_summary($cd):
         ($cd | to_entries | sort_by(-.value))
         | if length == 0 then "no context data"
@@ -219,7 +240,7 @@ case "$cmd" in
           examples: $c.examples,
           context_distribution: $c.context_distribution,
           cluster_meta: {
-            method: "behavior-2d-v3",
+            method: $method,
             archetype: $c.archetype,
             bin_key: $c.bin_key,
             discipline_bin: $c.discipline_bin,
@@ -235,12 +256,10 @@ case "$cmd" in
           last_used_at: (.last_used_at // null)
         };
 
-      # Step A: drop stale inferred entries (not in new clusters)
       ($clusters | map(.archetype)) as $keep
       | .profile.subprofiles |= with_entries(
           select(.value.origin == "manual" or (.key as $k | $keep | index($k)))
         )
-      # Step B: upsert each cluster keyed by archetype; skip if manual collision
       | .profile.last_cluster_at = $now
       | reduce $clusters[] as $c (
           .;
@@ -252,7 +271,6 @@ case "$cmd" in
     ' "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
 
-    # Warn on manual collisions
     skipped="$(jq -r --argjson clusters "$clusters" '
       ($clusters | map(.archetype)) as $names
       | [.profile.subprofiles | to_entries[] | select(.value.origin == "manual" and (.key as $k | $names | index($k))) | .key]
@@ -283,32 +301,26 @@ case "$cmd" in
     fi
     [ -z "$branch" ] && branch="$(git branch --show-current 2>/dev/null || echo "")"
     band="$(_band "$hour")"
+    branch_norm="$(_branch_norm "$branch")"
 
-    # Mirror branch_norm logic
-    case "$branch" in
-      ""|"?") branch_norm="?";;
-      main|master|develop|trunk) branch_norm="main";;
-      spike[-/]*|exp[-/]*|experiment[-/]*) branch_norm="spike";;
-      feature[-/]*|feat[-/]*) branch_norm="feature";;
-      fix[-/]*|bugfix[-/]*|hotfix[-/]*) branch_norm="fix";;
-      release[-/]*|rc[-/]*) branch_norm="release";;
-      chore[-/]*|refactor[-/]*) branch_norm="chore";;
-      *) branch_norm="other";;
-    esac
+    neighbors=($(_band_neighbors "$band"))
+    n1="${neighbors[0]:-}"
+    n2="${neighbors[1]:-}"
 
     exact_key="$repo:$branch_norm @ $band"
+    n1_key="$repo:$branch_norm @ $n1"
+    n2_key="$repo:$branch_norm @ $n2"
     repo_only_prefix="$repo:"
+    rb_prefix="$repo:$branch_norm"
 
-    # Tiered match:
-    # 1. Exact (repo, branch_norm, band)
-    # 2. Any band, same (repo, branch_norm)
-    # 3. Any (repo, ?) — same repo, any branch/band
-    # Tiebreaker: total observation_count.
-    jq -r --arg exact "$exact_key" --arg rprefix "$repo_only_prefix" --arg rb "$repo:$branch_norm" '
+    # Tiered match: exact (with neighbor smoothing), then same repo+branch,
+    # then same repo. Tiebreaker: total observation_count.
+    jq -r --arg exact "$exact_key" --arg n1 "$n1_key" --arg n2 "$n2_key" \
+          --arg rprefix "$repo_only_prefix" --arg rb "$rb_prefix" '
       def score($sp):
         ($sp.context_distribution // {}) as $cd
         | {
-            exact: ($cd[$exact] // 0),
+            exact: (($cd[$exact] // 0) + 0.5 * (($cd[$n1] // 0) + ($cd[$n2] // 0))),
             same_rb: ([$cd | to_entries[] | select(.key | startswith($rb + " @ ")) | .value] | add // 0),
             same_repo: ([$cd | to_entries[] | select(.key | startswith($rprefix)) | .value] | add // 0),
             observations: ($sp.cluster_meta.observation_count // 0)
@@ -329,12 +341,12 @@ case "$cmd" in
   status)
     last="$(jq -r '.profile.last_cluster_at // "never"' "$CONFIG_FILE")"
     pinned="$(jq -r '.profile.pinned // "none"' "$CONFIG_FILE")"
-    auto="$(jq -r '.profile.auto_switch' "$CONFIG_FILE")"
+    suggest="$(jq -r '.profile.auto_suggest' "$CONFIG_FILE")"
     n_inf="$(jq -r '[.profile.subprofiles[] | select(.origin == "inferred")] | length' "$CONFIG_FILE")"
     n_man="$(jq -r '[.profile.subprofiles[] | select(.origin == "manual")] | length' "$CONFIG_FILE")"
     n_obs=0
     [ -f "$SESSIONS" ] && n_obs="$(wc -l < "$SESSIONS" | tr -d ' ')"
-    echo "auto_switch: $auto"
+    echo "auto_suggest: $suggest"
     echo "pinned: $pinned"
     echo "last_cluster_at: $last"
     echo "observations: $n_obs"

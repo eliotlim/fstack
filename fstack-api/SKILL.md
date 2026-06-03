@@ -1,7 +1,7 @@
 ---
 name: fstack-api
-version: 0.1.0
-description: Design and stub a new API endpoint. Detects style (REST, tRPC, GraphQL, Hono, FastAPI). Calibrates validation to risk tolerance and architecture care.
+version: 0.6.0
+description: Design and stub a new API endpoint. Detects style (REST, tRPC, GraphQL, Hono, FastAPI). Calibrates validation to the active subprofile.
 allowed-tools:
   - Bash
   - Read
@@ -23,7 +23,7 @@ triggers:
 
 1. Get the endpoint summary.
 2. Detect API style in the repo.
-3. Calibrate from profile.
+3. Calibrate from profile (visible).
 4. Propose.
 5. Write. Log.
 
@@ -37,12 +37,13 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
-echo "PROFILE:"
-"$_FSTACK_BIN/fstack-profile" dimensions
+"$_FSTACK_BIN/fstack-profile" calibrate api
 echo "STACK:"
-"$_FSTACK_BIN/fstack-config" get stack.backend_framework
-"$_FSTACK_BIN/fstack-config" get stack.language
+"$_FSTACK_BIN/fstack-config" get-active stack.backend_framework
+"$_FSTACK_BIN/fstack-config" get-active stack.language
 ```
+
+The `CALIBRATION` block prints the active subprofile name and the dim values driving the proposal. Re-print the same block in step 3 so the user sees how it shaped the plan.
 
 ## 1. Endpoint summary
 
@@ -67,20 +68,29 @@ First match wins:
 
 None? Fall back to declared `stack.backend_framework`. Empty? Ask.
 
-## 3. Calibrate
+## 3. Calibrate (visible)
+
+Print the calibration block, then map each dim to the proposal.
+
+```
+CALIBRATION (production):
+  risk_tolerance       0.20  (stability)
+  architecture_care    0.85  (principled)
+  test_rigor           0.80  (rigorous)
+```
 
 | Dim | Effect |
 |-----|--------|
-| `architecture_care` low | inline validation |
-| `architecture_care` mid | adjacent validator file |
-| `architecture_care` high | separate schema (zod/valibot/pydantic), input + output types, service-layer call |
-| `risk_tolerance` low | explicit types everywhere, 4xx on every missing key |
-| `risk_tolerance` high | trust callers, validate at boundaries |
-| `test_rigor` low | skip tests |
-| `test_rigor` mid | smoke (happy + one 4xx) |
-| `test_rigor` high | smoke + auth-failure + edges + integration |
+| `architecture_care` pragmatic | inline validation |
+| `architecture_care` balanced | adjacent validator file |
+| `architecture_care` principled | separate schema (zod / valibot / pydantic), input + output types, service-layer call |
+| `risk_tolerance` stability | explicit types everywhere, 4xx on every missing key |
+| `risk_tolerance` speed | trust callers, validate at boundaries |
+| `test_rigor` lean | skip tests |
+| `test_rigor` balanced | smoke (happy + one 4xx) |
+| `test_rigor` rigorous | smoke + auth-failure + edges + integration |
 
-Empty dim = 0.5.
+Unset dim is treated as balanced.
 
 ## 4. Propose
 
@@ -96,6 +106,7 @@ Inputs: <fields + types>
 Output: <shape>
 Errors: <4xx list>
 Auth: <required|optional|none>
+Calibration: <one-line restatement of the dim values applied>
 ```
 
 AskUserQuestion: apply / change / cancel.
@@ -111,7 +122,6 @@ export const <resource>Router = router({
   <action>: publicProcedure
     .input(z.object({ ... }))
     .mutation(async ({ input, ctx }) => {
-      // TODO
       return { ok: true }
     }),
 })
@@ -122,7 +132,6 @@ export const <resource>Router = router({
 ```ts
 app.post('<path>', zValidator('json', InputSchema), async (c) => {
   const body = c.req.valid('json')
-  // TODO
   return c.json({ ok: true })
 })
 ```
@@ -133,7 +142,6 @@ app.post('<path>', zValidator('json', InputSchema), async (c) => {
 export async function POST(req: NextRequest) {
   const parsed = InputSchema.safeParse(await req.json())
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 })
-  // TODO
   return NextResponse.json({ ok: true })
 }
 ```
@@ -143,7 +151,6 @@ export async function POST(req: NextRequest) {
 ```python
 @router.post("<path>")
 async def <action>(payload: <Schema>) -> <Output>:
-    # TODO
     return <Output>(ok=True)
 ```
 
@@ -151,7 +158,7 @@ Use the project's existing error shape. Don't invent new ones.
 
 ## 6. Log
 
-Annotations are short, concrete, and human-readable. They feed clustering.
+Annotations are short, concrete, human-readable. They feed clustering.
 
 ```bash
 # validation: inline=0.2, extracted=0.5, schema+types=0.85
@@ -172,9 +179,10 @@ Good annotations: "POST /teams/invite in tRPC, separate schema + types", "Quick 
   Files: <list>
   Validation: <inline|extracted|schema>
   Tests: <none|smoke|full>
+  Calibration: <archetype> · <dim-1>=<band> · <dim-2>=<band> · <dim-3>=<band>
   TODO: <one line>
 ```
 
 ## Voice
 
-User knows REST. Don't explain it. Repo pattern beats declared stack.
+User knows REST. Don't explain it. Repo pattern beats declared stack. Always show calibration so the user can see how the active subprofile shaped the response.

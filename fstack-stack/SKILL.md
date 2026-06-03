@@ -1,6 +1,6 @@
 ---
 name: fstack-stack
-version: 0.2.0
+version: 0.6.0
 description: Declare the tech stack for the active subprofile. Different modes can hold different stacks (acme-prod = Postgres/Prisma, late-night = SQLite/Drizzle).
 allowed-tools:
   - Bash
@@ -98,10 +98,10 @@ Walk 10 categories via AskUserQuestion. 3-4 picks each.
 
 Tilt recommendations from the active subprofile's declared dimensions:
 
-- `bias_for_action ≥ 0.65`: batteries-included (Next.js, Vercel, Clerk, Drizzle).
-- `architecture_care ≥ 0.65`: explicit + typed (Hono + Kysely, Fastify + raw, Drizzle over Prisma).
-- `risk_tolerance ≤ 0.35`: boring (Postgres, Node, React).
-- `risk_tolerance ≥ 0.65`: newer fair game (Bun, Effect, latest frameworks).
+- `bias_for_action ≥ 0.65` (action): batteries-included (Next.js, Vercel, Clerk, Drizzle).
+- `architecture_care ≥ 0.65` (principled): explicit + typed (Hono + Kysely, Fastify + raw, Drizzle over Prisma).
+- `risk_tolerance ≤ 0.35` (stability): boring (Postgres, Node, React).
+- `risk_tolerance ≥ 0.65` (speed): newer fair game (Bun, Effect, latest frameworks).
 
 After each pick:
 
