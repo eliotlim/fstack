@@ -1,5 +1,5 @@
 {
-  "version": "0.4.0",
+  "version": "0.5.0",
   "install": {
     "mode": "dev",
     "install_path": "~/.claude/skills",
@@ -22,7 +22,9 @@
           "bias_for_action": null,
           "scope_appetite": null,
           "test_rigor": null,
-          "architecture_care": null
+          "architecture_care": null,
+          "detail_preference": null,
+          "autonomy": null
         },
         "preferences": {
           "code_style": null,

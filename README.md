@@ -4,16 +4,9 @@ Full-stack skills framework for those who build. Pairs with [gstack](https://git
 
 fstack profiles how you work and what you build with, then shapes recommendations across scaffolding, API design, and schema work to match.
 
-You're not one developer. **You have modes.** Some work is mature production. Some is early-stage that needs to move fast. Some is a late-night learning prototype.
+You're not one developer. **You have archetypes.** Production work is deliberate and balanced. A spike is fluid and ambitious. A late-night side project is fluid and focused. None of these is "better" than the others. fstack notices which archetype your current work fits and switches accordingly.
 
-fstack notices and adapts:
-
-1. Every action gets logged with context (repo, branch, hour, weekday).
-2. Observations roll up into **work contexts** keyed by `(repo, branch-type)`.
-3. Each context lives in a 2-D behavior space: **rigor** × **appetite**. Contexts in the same cell cluster together.
-4. Each cluster becomes a subprofile fstack can recognize and switch into.
-
-The same repo can hold multiple modes. `acme:main` clusters with production-style work; `acme:spike` clusters with fast experiments. Behavior is the axis. Context is descriptive.
+The archetype is the identity. `(repo, branch)` is just where it shows up — the same archetype can span many repos and many branches.
 
 ## Install
 
@@ -32,134 +25,98 @@ After install, open a new Claude Code session and type `/fstack`.
 
 | Skill | Does |
 |-------|------|
-| `/fstack` | Router + setup. Auto-clusters and auto-switches per context. |
-| `/fstack-profile` | Show, edit, switch, pin, list, cluster. |
+| `/fstack` | Router + setup. Auto-clusters and auto-switches archetype per context. |
+| `/fstack-profile` | Show, edit, switch, pin archetypes. |
 | `/fstack-stack` | Declare tech stack on the active subprofile. |
 | `/fstack-skill` | Make your own skills. |
 | `/fstack-scaffold` | Scaffold a feature. Logs annotated observations. |
 | `/fstack-api` | Stub an endpoint. Logs annotated observations. |
 | `/fstack-schema` | Model + migration. Logs annotated observations. |
 
-## How modes emerge
+## Seven dimensions
 
-Domain skills log every meaningful choice. Each observation lands in `~/.fstack/observations/sessions.jsonl` with auto-captured context.
+Each dimension is a spectrum between two legitimate working styles. Pick where you actually live, not where you think you "should" be.
 
-When `/fstack` runs, it batches observations into **work contexts**:
+| Dimension | Low end | High end |
+|-----------|---------|----------|
+| `risk_tolerance` | cautious, measured | bold, experimental |
+| `bias_for_action` | deliberate, plan-first | action-oriented, shipping |
+| `scope_appetite` | focused, narrow | ambitious, comprehensive |
+| `test_rigor` | lean, streamlined | rigorous, thorough |
+| `architecture_care` | pragmatic, direct | principled, structured |
+| `detail_preference` | terse, signal-heavy | thorough, explanatory |
+| `autonomy` | collaborative, consultative | autonomous, self-directed |
 
-- Session key = `(repo, branch_norm)` where branches normalize to `main / spike / feature / fix / release / chore / other`.
-- Per-context: weighted mean of each observed dimension, hour distribution, list of recent annotations.
+The last two are imported from gstack's psychographic. They fit full-stack work — different archetypes call for different communication density and different levels of delegation.
 
-Each context is then projected to two axes:
+## Archetypes
 
-- **rigor** = avg of `(1 - risk_tolerance)`, `test_rigor`, `architecture_care`. How careful.
-- **appetite** = avg of `bias_for_action`, `scope_appetite`. How ambitious.
+Observations roll up into work contexts `(repo, branch_norm)`. Each context projects onto two axes:
 
-Both axes get binned `loose / balanced / rigorous` × `small / steady / bold`. Nine cells. Each cell with `>= threshold` observations becomes a subprofile:
+- **discipline** = avg of `(1 − risk_tolerance, test_rigor, architecture_care)`. Fluid ↔ deliberate.
+- **ambition** = avg of `(bias_for_action, scope_appetite)`. Focused ↔ ambitious.
 
-| Cell | Alias |
-|------|-------|
-| loose-small | quick-hack |
-| loose-steady | iterate |
-| loose-bold | move-fast |
-| balanced-small | polish |
-| balanced-steady | default-shipping |
-| balanced-bold | growth-push |
-| rigorous-small | maintenance |
-| rigorous-steady | production |
-| rigorous-bold | scale-push |
+Both axes bin `low / mid / high`, giving 9 cells with archetype names:
 
-Example output:
+| | focused | balanced | ambitious |
+|---|---|---|---|
+| **fluid** | exploration | iteration | sprint |
+| **balanced** | polish | shipping | expansion |
+| **deliberate** | maintenance | production | hardening |
 
-```
-/fstack-profile list
-* default              (manual)    default
-  rigorous-steady      (inferred)  production
-  loose-bold           (inferred)  move-fast
-  loose-small          (inferred)  quick-hack
-```
+Each cell that crosses the observation threshold becomes a subprofile keyed by archetype name. You reference it directly:
 
 ```
-/fstack-profile show rigorous-steady
-SUBPROFILE: rigorous-steady (inferred) — production
-  inferred: rigorous rigor, steady appetite. Seen in: acme:main @ afternoon (4), acme:main @ morning (4)
+/fstack-profile use production
+/fstack-profile show sprint
+/fstack-profile pin exploration
+```
 
-DEVELOPER
+Same archetype can span many `(repo, branch)` combinations:
+
+```
+/fstack-profile show production
+ARCHETYPE: production (inferred, active)
+  deliberate x balanced
+
+DIMENSIONS
   risk_tolerance:    0.18 (cautious)
-  test_rigor:        0.83 (full-coverage)
+  test_rigor:        0.83 (rigorous)
   architecture_care: 0.88 (principled)
+  ...
 
 SEEN IN
-  acme:main @ afternoon  (4)
-  acme:main @ morning  (4)
+  acme:main @ afternoon  (8)
+  acme:main @ morning    (4)
+  client-foo:main @ afternoon  (3)
 
 EXAMPLES
   - FK + ON DELETE CASCADE
-  - full integration tests
   - locked schema before merge
-```
-
-Versus the same repo on a spike branch:
-
-```
-/fstack-profile show loose-bold
-SUBPROFILE: loose-bold (inferred) — move-fast
-  inferred: loose rigor, bold appetite. Seen in: acme:spike @ afternoon (6)
-
-DEVELOPER
-  risk_tolerance:    0.83 (bold)
-  bias_for_action:   0.88 (shipper)
-  scope_appetite:    0.85 (ambitious)
-  test_rigor:        0.20 (happy-path)
-
-EXAMPLES
-  - experimental component lib
-  - ship + iterate, see what breaks
-  - no tests on spike branch
+  - full integration tests
 ```
 
 ## Auto-switch
 
 `/fstack` preamble:
 
-1. If `last_cluster_at` is stale (> 24h) and there are new observations, recluster.
-2. Read current context: repo, branch_norm, hour.
-3. Tiered match against inferred clusters' `context_distribution`:
-   - **Exact**: `<repo>:<branch_norm> @ <band>` — best signal.
-   - **Same repo + branch**: matches across hour bands.
-   - **Same repo**: matches across any branch/band.
-4. Pick the cluster with the highest score. If nothing matches, stay put.
-5. If match differs from active and `pinned == null` and `auto_switch == true`, switch.
+1. Re-cluster if stale (> 24h) and there are new observations.
+2. Read current context: `(repo, branch_norm, hour)`.
+3. Tiered lookup against each archetype's `context_distribution`:
+   - exact match `<repo>:<branch_norm> @ <band>`
+   - same repo + branch
+   - same repo
+4. Pick the highest-scoring archetype. Empty if nothing matches.
+5. Switch if match differs from active, `auto_switch == true`, and `pinned == null`.
 
-Switch is announced in one line. No surprises.
+Print one line: `SWITCHED: default -> production (matched on acme:main @ afternoon)`.
 
 ## Overrides
 
-- `/fstack-profile pin <key>` (or just `pin` for current) locks the active subprofile.
+- `/fstack-profile pin <archetype>` (or just `pin` for current) locks the active subprofile.
 - `/fstack-profile unpin` clears.
 - `fstack-config set profile.auto_switch false` disables entirely.
-
-Manual subprofiles still work for situations clustering can't infer:
-
-```
-/fstack-profile create work --label "Work mode" --description "deep focus"
-/fstack-profile use work
-```
-
-Manual subprofiles carry `origin: "manual"` and are never overwritten by clustering.
-
-## Profile mechanics
-
-Each subprofile tracks:
-
-- `developer`: 5 dimensions (0..1) — risk_tolerance, bias_for_action, scope_appetite, test_rigor, architecture_care.
-- `preferences`: 5 string fields — code_style, comment_level, abstraction, error_handling, type_safety.
-- `stack`: 10 array fields — language, runtime, frontend, ui, backend_framework, database, orm, auth, deploy, testing.
-- `inferred`: rolling means + sample count.
-- `examples`: up to 5 representative annotations (inferred only).
-- `context_distribution`: `{ "<repo>:<branch_norm> @ <band>": count }` (inferred only).
-
-For manual subprofiles: `developer` is what you declared.
-For inferred: `developer` is computed from observations.
+- `/fstack-profile create <name>` creates a manual subprofile. Manual names that collide with archetype names take precedence (clustering skips them).
 
 ## Config
 
@@ -169,14 +126,14 @@ For inferred: `developer` is computed from observations.
 ~/.fstack-bin/fstack-config show | jq
 ```
 
-Schema (v0.4.0):
+Schema (v0.5.0):
 
 ```json
 {
-  "version": "0.4.0",
+  "version": "0.5.0",
   "install": { "mode": "dev|prod", "...": "..." },
   "profile": {
-    "active": "<key>",
+    "active": "<archetype-or-manual-key>",
     "pinned": "<key>|null",
     "auto_switch": true,
     "last_cluster_at": "...",
@@ -185,14 +142,33 @@ Schema (v0.4.0):
         "label": "...",
         "description": "...",
         "origin": "manual|inferred",
-        "developer":   { "...": "..." },
+        "developer": {
+          "risk_tolerance": 0..1|null,
+          "bias_for_action": 0..1|null,
+          "scope_appetite": 0..1|null,
+          "test_rigor": 0..1|null,
+          "architecture_care": 0..1|null,
+          "detail_preference": 0..1|null,
+          "autonomy": 0..1|null
+        },
         "preferences": { "...": "..." },
         "stack":       { "...": "..." },
         "inferred":    { "...": "..." },
         "examples":    [],
-        "context_distribution": {},
-        "cluster_meta": { "method": "behavior-2d-v2", "rigor_bin": "...", "appetite_bin": "...", "...": "..." } | null,
-        "declared_at": "...",
+        "context_distribution": { "<repo>:<branch_norm> @ <band>": count },
+        "cluster_meta": {
+          "method": "behavior-2d-v3",
+          "archetype": "production",
+          "bin_key": "deliberate-balanced",
+          "discipline_bin": "deliberate",
+          "ambition_bin": "balanced",
+          "discipline_mean": 0..1,
+          "ambition_mean": 0..1,
+          "context_count": N,
+          "observation_count": N,
+          "last_clustered_at": "..."
+        } | null,
+        "declared_at": "...|null",
         "created_at":  "...",
         "last_used_at": "..."
       }
@@ -209,8 +185,11 @@ Observations: `~/.fstack/observations/sessions.jsonl`. One JSONL stream.
 Auto. First read of an old config upgrades:
 
 - v0.1 → v0.2: wrap flat profile + top-level stack into `default` subprofile.
-- v0.2 → v0.3: add `pinned`, `auto_switch`. Mark existing subprofiles `origin: "manual"`. Consolidate observation logs into `sessions.jsonl`.
-- v0.3 → v0.4: drop time-based `<repo>-<band>` inferred subprofiles (the cluster axis was wrong); re-cluster on next `/fstack` produces behavior-first ones. Manual subprofiles preserved.
+- v0.2 → v0.3: add `pinned`, `auto_switch`. Mark existing subprofiles `origin: "manual"`. Consolidate observation logs.
+- v0.3 → v0.4: drop time-keyed inferred subprofiles; behavior-first re-cluster on next `/fstack`.
+- v0.4 → v0.5: add `detail_preference` + `autonomy` dimensions. Drop inferred subprofiles (key format moved from bin-name to archetype-name). Re-cluster.
+
+Manual subprofiles preserved at every step.
 
 ## Custom skills
 

@@ -1,7 +1,7 @@
 ---
 name: fstack-profile
-version: 0.2.0
-description: Inspect, edit, and switch fstack subprofiles. Each subprofile is a mode (acme-prod, late-night, side-project) with its own dimensions, stack, preferences, observations.
+version: 0.5.0
+description: Inspect, edit, and switch fstack archetypes. Archetypes are behavior-derived (production, sprint, exploration, etc.) and reference repo/branch combinations via context_distribution.
 allowed-tools:
   - Bash
   - Read
@@ -11,28 +11,29 @@ triggers:
   - show my profile
   - edit my profile
   - update my profile
-  - developer vibe
+  - which archetype am I in
   - profile gap
-  - switch profile
-  - which profile am I in
-  - new subprofile
+  - switch archetype
+  - new manual subprofile
   - create profile
   - list profiles
 ---
 
 # /fstack-profile
 
-Writes target the **active subprofile**. To affect a different mode, switch first.
+Writes target the active subprofile. To affect a different one, switch first.
 
-Five dimensions at `developer.*` (per subprofile):
+Seven dimensions at `developer.*`. Both ends of each spectrum are legitimate working styles; pick where the user actually lives, not where you think is "best."
 
 - `risk_tolerance` (0 cautious, 1 bold)
-- `bias_for_action` (0 plan first, 1 ship now)
-- `scope_appetite` (0 MVP, 1 boil the ocean)
-- `test_rigor` (0 happy path, 1 full coverage)
-- `architecture_care` (0 ship now, 1 principled)
+- `bias_for_action` (0 deliberate, 1 action-oriented)
+- `scope_appetite` (0 focused, 1 ambitious)
+- `test_rigor` (0 lean, 1 rigorous)
+- `architecture_care` (0 pragmatic, 1 principled)
+- `detail_preference` (0 terse, 1 thorough)
+- `autonomy` (0 collaborative, 1 autonomous)
 
-Five preferences at `preferences.*` (per subprofile):
+Five preferences at `preferences.*`:
 
 - `code_style` (functional, oop, mixed)
 - `comment_level` (none, minimal, verbose)
@@ -149,18 +150,22 @@ Cannot remove the last subprofile (binary enforces). Confirm via AskUserQuestion
 
 ## 8. Edit a dimension (writes to active)
 
-Map phrasing:
+Map phrasing. Both directions are normal moves; don't assume "up" is improvement.
 
-- more cautious → `risk_tolerance` down
-- more bold → `risk_tolerance` up
-- plan more → `bias_for_action` down
-- ship faster → `bias_for_action` up
-- smaller scope → `scope_appetite` down
-- complete → `scope_appetite` up
-- more coverage → `test_rigor` up
-- lighter tests → `test_rigor` down
-- principled → `architecture_care` up
-- ship now → `architecture_care` down
+- more cautious / measured → `risk_tolerance` down
+- more bold / experimental → `risk_tolerance` up
+- more deliberate / plan more → `bias_for_action` down
+- more action / ship more → `bias_for_action` up
+- more focused / smaller scope → `scope_appetite` down
+- more ambitious / boil-the-ocean → `scope_appetite` up
+- more rigorous / thorough tests → `test_rigor` up
+- leaner tests → `test_rigor` down
+- more principled / structured → `architecture_care` up
+- more pragmatic / direct → `architecture_care` down
+- terser → `detail_preference` down
+- more thorough explanations → `detail_preference` up
+- more collaborative / consult more → `autonomy` down
+- more autonomous / delegate more → `autonomy` up
 
 Read current. Compute new (delta ±0.2, clamp 0..1, or use explicit number).
 
@@ -206,7 +211,7 @@ Ask: update declared to observed? keep declared? leave as-is? Apply only what th
 Confirm. If yes:
 
 ```bash
-"$_FSTACK_BIN/fstack-config" set-active-json developer '{"risk_tolerance":null,"bias_for_action":null,"scope_appetite":null,"test_rigor":null,"architecture_care":null}'
+"$_FSTACK_BIN/fstack-config" set-active-json developer '{"risk_tolerance":null,"bias_for_action":null,"scope_appetite":null,"test_rigor":null,"architecture_care":null,"detail_preference":null,"autonomy":null}'
 "$_FSTACK_BIN/fstack-config" set-active declared_at null
 ```
 

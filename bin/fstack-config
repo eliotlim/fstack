@@ -155,11 +155,31 @@ _migrate_v04() {
   echo "[fstack-config] migrated to v0.4.0 (dropped repo+band clusters; behavior-first re-cluster on next /fstack)" >&2
 }
 
+# v0.4 -> v0.5 (add detail_preference + autonomy; archetype-keyed inferred clusters)
+_migrate_v05() {
+  local needs
+  needs="$(jq -r 'if .version < "0.5.0" then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")"
+  [ "$needs" = "yes" ] || return 0
+  local migrated
+  migrated="$(jq '
+    .version = "0.5.0"
+    | .profile.subprofiles |= with_entries(
+        select(.value.origin != "inferred")
+        | .value.developer.detail_preference = (.value.developer.detail_preference // null)
+        | .value.developer.autonomy = (.value.developer.autonomy // null)
+      )
+    | .profile.last_cluster_at = null
+  ' "$CONFIG_FILE")"
+  _atomic_write "$CONFIG_FILE" "$migrated"
+  echo "[fstack-config] migrated to v0.5.0 (added detail_preference + autonomy; archetype-keyed clusters on next /fstack)" >&2
+}
+
 _maybe_migrate() {
   [ -f "$CONFIG_FILE" ] || return 0
   _migrate_v02
   _migrate_v03
   _migrate_v04
+  _migrate_v05
 }
 
 _active_key() {

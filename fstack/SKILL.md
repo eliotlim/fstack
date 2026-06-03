@@ -1,7 +1,7 @@
 ---
 name: fstack
-version: 0.3.0
-description: Full-stack engineer's companion. Router and setup entrypoint. Auto-detects which mode you're in (work prod vs side project vs late-night) by clustering your observations.
+version: 0.5.0
+description: Full-stack engineer's companion. Router and setup entrypoint. Detects which archetype you're working in (production, sprint, exploration, etc.) from observed behavior and switches automatically.
 allowed-tools:
   - Bash
   - Read
@@ -14,7 +14,7 @@ triggers:
   - set up fstack
   - configure fstack
   - show my fstack profile
-  - which mode am I in
+  - which archetype am I in
   - switch profile
 ---
 
@@ -97,15 +97,17 @@ fi
 
 ## Setup
 
-Setup writes into the **active** subprofile (always `default` on first run).
+Setup writes into the active subprofile (always `default` on first run).
 
-Five AskUserQuestion calls, one at a time. A=0.2, B=0.5, C=0.8.
+Seven AskUserQuestion calls, one at a time. Each dimension has two legitimate ends. Map A=0.2, B=0.5, C=0.8. Don't suggest one end is "better" than the other.
 
-1. `risk_tolerance`. Check carefully / Balanced / Move fast.
-2. `bias_for_action`. Plan first / Balanced / Ship now.
-3. `scope_appetite`. Smallest useful / Balanced / Complete.
-4. `test_rigor`. Happy path / Balanced / Full coverage.
-5. `architecture_care`. Ship now / Balanced / Design first.
+1. `risk_tolerance`. Cautious + measured / Balanced / Bold + experimental.
+2. `bias_for_action`. Deliberate + plan-first / Balanced / Action-oriented + shipping.
+3. `scope_appetite`. Focused + narrow / Balanced / Ambitious + comprehensive.
+4. `test_rigor`. Lean + streamlined / Balanced / Rigorous + thorough.
+5. `architecture_care`. Pragmatic + direct / Balanced / Principled + structured.
+6. `detail_preference`. Terse + signal-heavy / Balanced / Thorough + explanatory.
+7. `autonomy`. Collaborative + consultative / Balanced / Autonomous + self-directed.
 
 After each:
 
@@ -113,7 +115,7 @@ After each:
 "$_FSTACK_BIN/fstack-config" set-active developer.<dim> <value>
 ```
 
-After all five:
+After all seven:
 
 ```bash
 "$_FSTACK_BIN/fstack-config" set-active declared_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -122,7 +124,7 @@ After all five:
 
 Then: "Declare your stack? Takes a minute." Yes → invoke `/fstack-stack`.
 
-Also: "As you use fstack, observations get clustered into auto-detected modes (work vs side-project, day vs late-night). I'll switch to the right one based on context. Disable with `/fstack-profile unpin off`."
+Mention: "As you work, fstack derives behavior archetypes (production, sprint, exploration, etc.) from your observations and switches to whichever fits the current repo + branch + hour. Disable with `fstack-config set profile.auto_switch false`."
 
 ## Route
 

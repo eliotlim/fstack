@@ -78,8 +78,8 @@ case "$cmd" in
         elif . < 12 then "morning"
         elif . < 18 then "afternoon"
         else "evening" end;
-      def hbin: if . < 0.4 then "loose" elif . < 0.65 then "balanced" else "rigorous" end;
-      def abin: if . < 0.4 then "small" elif . < 0.65 then "steady" else "bold" end;
+      def dbin: if . < 0.4 then "fluid" elif . < 0.65 then "balanced" else "deliberate" end;
+      def abin: if . < 0.4 then "focused" elif . < 0.65 then "balanced" else "ambitious" end;
       def branch_norm:
         if . == null or . == "" then "?"
         elif (. == "main" or . == "master" or . == "develop" or . == "trunk") then "main"
@@ -89,16 +89,16 @@ case "$cmd" in
         elif test("^(release|rc)[/-]") then "release"
         elif test("^(chore|refactor)[/-]") then "chore"
         else "other" end;
-      def alias_for(k):
-        {"loose-small":"quick-hack",
-         "loose-steady":"iterate",
-         "loose-bold":"move-fast",
-         "balanced-small":"polish",
-         "balanced-steady":"default-shipping",
-         "balanced-bold":"growth-push",
-         "rigorous-small":"maintenance",
-         "rigorous-steady":"production",
-         "rigorous-bold":"scale-push"}[k] // k;
+      def archetype_for(bin_key):
+        {"fluid-focused":"exploration",
+         "fluid-balanced":"iteration",
+         "fluid-ambitious":"sprint",
+         "balanced-focused":"polish",
+         "balanced-balanced":"shipping",
+         "balanced-ambitious":"expansion",
+         "deliberate-focused":"maintenance",
+         "deliberate-balanced":"production",
+         "deliberate-ambitious":"hardening"}[bin_key] // bin_key;
 
       # 1) Filter, drop annotate-only entries
       map(select(.ts >= $cutoff and .dimension != null))
@@ -135,9 +135,9 @@ case "$cmd" in
           }
         )
 
-      # 3) Project each context to (rigor, appetite); 0.5 fallback if no relevant dim
+      # 3) Project each context to (discipline, ambition); 0.5 fallback if no relevant dim
       | map(. + {
-          rigor: (
+          discipline: (
             [
               (if (.dims | has("risk_tolerance")) then (1 - .dims.risk_tolerance) else null end),
               .dims.test_rigor,
@@ -145,22 +145,23 @@ case "$cmd" in
             ] | map(select(. != null))
             | if length == 0 then 0.5 else (add / length) end
           ),
-          appetite: (
+          ambition: (
             [.dims.bias_for_action, .dims.scope_appetite]
             | map(select(. != null))
             | if length == 0 then 0.5 else (add / length) end
           )
         })
-      | map(. + {bin: ((.rigor | hbin) + "-" + (.appetite | abin))})
+      | map(. + {bin_key: ((.discipline | dbin) + "-" + (.ambition | abin))})
+      | map(. + {archetype: (archetype_for(.bin_key))})
 
-      # 4) Group contexts by 2-D cell, emit clusters
-      | group_by(.bin)
+      # 4) Group contexts by 2-D cell, emit clusters keyed by archetype
+      | group_by(.archetype)
       | map(
           {
-            key: .[0].bin,
-            label: (alias_for(.[0].bin)),
-            rigor_bin: (.[0].bin | split("-")[0]),
-            appetite_bin: (.[0].bin | split("-")[1]),
+            archetype: .[0].archetype,
+            bin_key: .[0].bin_key,
+            discipline_bin: (.[0].bin_key | split("-")[0]),
+            ambition_bin: (.[0].bin_key | split("-")[1]),
             context_count: length,
             observation_count: (map(.sample_count) | add),
             last_seen: (max_by(.last_ts) | .last_ts),
@@ -169,10 +170,10 @@ case "$cmd" in
               | group_by(.key)
               | map({key: .[0].key, value: ((map(.value) | add) / length)})
               | from_entries
-              | ({risk_tolerance: null, bias_for_action: null, scope_appetite: null, test_rigor: null, architecture_care: null}) + .
+              | ({risk_tolerance: null, bias_for_action: null, scope_appetite: null, test_rigor: null, architecture_care: null, detail_preference: null, autonomy: null}) + .
             ),
-            rigor_mean: ([.[] | .rigor] | add / length),
-            appetite_mean: ([.[] | .appetite] | add / length),
+            discipline_mean: ([.[] | .discipline] | add / length),
+            ambition_mean: ([.[] | .ambition] | add / length),
             context_distribution: (
               [.[] |
                 .repo as $r | .branch_norm as $b |
@@ -191,21 +192,21 @@ case "$cmd" in
       | map(select(.observation_count >= $th))
     ' "$SESSIONS")"
 
-    # Apply clusters into config: update or insert inferred subprofiles, preserve manuals.
-    # First: drop existing inferred subprofiles that no longer have a cluster.
-    new_keys="$(jq -r 'map(.key)[]' <<<"$clusters" | sort -u)"
+    # Apply clusters into config: keyed by archetype. Manual subprofiles preserved.
+    # A manual subprofile that happens to share an archetype name takes precedence
+    # (clustering skips it, prints a notice).
     new="$(jq --argjson clusters "$clusters" --arg now "$now" '
       def context_summary($cd):
         ($cd | to_entries | sort_by(-.value))
         | if length == 0 then "no context data"
           else
-            (.[0:2] | map("\(.key) (\(.value))") | join(", "))
-            + (if length > 2 then ", +\(length - 2) more" else "" end)
+            (.[0:3] | map("\(.key) (\(.value))") | join(", "))
+            + (if length > 3 then ", +\(length - 3) more" else "" end)
           end;
       def merge_inferred($c; $now):
         {
-          label: ($c.label),
-          description: ("inferred: \($c.rigor_bin) rigor, \($c.appetite_bin) appetite. Seen in: " + context_summary($c.context_distribution)),
+          label: ($c.archetype),
+          description: ($c.discipline_bin + " x " + $c.ambition_bin + ". Seen in: " + context_summary($c.context_distribution)),
           origin: "inferred",
           developer: ($c.dimensions),
           preferences: (.preferences // {code_style:null, comment_level:null, abstraction:null, error_handling:null, type_safety:null}),
@@ -218,11 +219,13 @@ case "$cmd" in
           examples: $c.examples,
           context_distribution: $c.context_distribution,
           cluster_meta: {
-            method: "behavior-2d-v2",
-            rigor_bin: $c.rigor_bin,
-            appetite_bin: $c.appetite_bin,
-            rigor_mean: $c.rigor_mean,
-            appetite_mean: $c.appetite_mean,
+            method: "behavior-2d-v3",
+            archetype: $c.archetype,
+            bin_key: $c.bin_key,
+            discipline_bin: $c.discipline_bin,
+            ambition_bin: $c.ambition_bin,
+            discipline_mean: $c.discipline_mean,
+            ambition_mean: $c.ambition_mean,
             context_count: $c.context_count,
             observation_count: $c.observation_count,
             last_clustered_at: $now
@@ -233,26 +236,34 @@ case "$cmd" in
         };
 
       # Step A: drop stale inferred entries (not in new clusters)
-      ($clusters | map(.key)) as $keep
+      ($clusters | map(.archetype)) as $keep
       | .profile.subprofiles |= with_entries(
           select(.value.origin == "manual" or (.key as $k | $keep | index($k)))
         )
-      # Step B: upsert each cluster into subprofiles, skipping manual collisions
+      # Step B: upsert each cluster keyed by archetype; skip if manual collision
       | .profile.last_cluster_at = $now
       | reduce $clusters[] as $c (
           .;
-          if (.profile.subprofiles[$c.key].origin // "inferred") == "manual"
+          if (.profile.subprofiles[$c.archetype].origin // "inferred") == "manual"
           then .
-          else .profile.subprofiles[$c.key] = ((.profile.subprofiles[$c.key] // {}) | merge_inferred($c; $now))
+          else .profile.subprofiles[$c.archetype] = ((.profile.subprofiles[$c.archetype] // {}) | merge_inferred($c; $now))
           end
         )
     ' "$CONFIG_FILE")"
     _atomic_write "$CONFIG_FILE" "$new"
 
+    # Warn on manual collisions
+    skipped="$(jq -r --argjson clusters "$clusters" '
+      ($clusters | map(.archetype)) as $names
+      | [.profile.subprofiles | to_entries[] | select(.value.origin == "manual" and (.key as $k | $names | index($k))) | .key]
+      | join(", ")
+    ' "$CONFIG_FILE")"
+    [ -n "$skipped" ] && echo "skipped (manual collision): $skipped"
+
     n_inferred="$(jq -r '[.profile.subprofiles[] | select(.origin == "inferred")] | length' "$CONFIG_FILE")"
     n_manual="$(jq -r '[.profile.subprofiles[] | select(.origin == "manual")] | length' "$CONFIG_FILE")"
     n_obs="$(jq -r --argjson clusters "$clusters" '$clusters | map(.observation_count) | add // 0' <<<"{}")"
-    echo "clustered: $n_inferred inferred (from $n_obs observations), $n_manual manual"
+    echo "clustered: $n_inferred inferred archetypes (from $n_obs observations), $n_manual manual"
     ;;
 
   match)

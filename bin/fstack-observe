@@ -196,7 +196,9 @@ case "$cmd" in
           ["bias_for_action", $d.bias_for_action, $r.bias_for_action],
           ["scope_appetite", $d.scope_appetite, $r.scope_appetite],
           ["test_rigor", $d.test_rigor, $r.test_rigor],
-          ["architecture_care", $d.architecture_care, $r.architecture_care]
+          ["architecture_care", $d.architecture_care, $r.architecture_care],
+          ["detail_preference", $d.detail_preference, $r.detail_preference],
+          ["autonomy", $d.autonomy, $r.autonomy]
         ]
       | .[]
       | select(.[1] != null and .[2] != null)

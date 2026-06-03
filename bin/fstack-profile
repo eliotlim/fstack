@@ -66,17 +66,30 @@ case "$cmd" in
 
   list)
     jq -r '
+      def short_ctx($cd):
+        ($cd | to_entries | sort_by(-.value))
+        | if length == 0 then ""
+          else (.[0:2] | map(.key | split(" @ ")[0]) | unique | join(", "))
+          end;
       .profile.active as $a
       | .profile.pinned as $pin
       | .profile.subprofiles
       | to_entries
+      | sort_by(.value.origin)
       | .[]
       | (if .key == $a then "* " else "  " end)
         + "\(.key)"
-        + (if .value.origin == "inferred" then "  (inferred)" else "  (manual)" end)
-        + (if .key == $pin then "  [pinned]" else "" end)
-        + "  \(.value.label // .key)"
-        + (if .value.description then " — \(.value.description)" else "" end)
+        + (if .value.origin == "inferred" then " (inferred" else " (manual" end)
+        + (if .key == $a then ", active" else "" end)
+        + (if .key == $pin then ", pinned" else "" end)
+        + ")"
+        + (if .value.cluster_meta then
+             "  " + .value.cluster_meta.discipline_bin + " x " + .value.cluster_meta.ambition_bin
+           else "" end)
+        + (if (.value.context_distribution // {}) | length > 0 then
+             "  — " + short_ctx(.value.context_distribution)
+           elif .value.description then " — \(.value.description)"
+           else "" end)
     ' "$CONFIG_FILE"
     ;;
 
@@ -212,7 +225,7 @@ case "$cmd" in
   dimensions)
     key="$(_resolve_key "${1:-}")"
     _assert_exists "$key"
-    jq -r --arg k "$key" '.profile.subprofiles[$k].developer | to_entries | .[] | "\(.key)=\(.value)"' "$CONFIG_FILE"
+    jq -r --arg k "$key" '.profile.subprofiles[$k].developer | to_entries | .[] | "\(.key)=\(.value // "null")"' "$CONFIG_FILE"
     ;;
 
   stack)
@@ -238,8 +251,8 @@ case "$cmd" in
       exit 0
     fi
     risk_b="$(_band "${risk:-0.5}" cautious balanced bold)"
-    action_b="$(_band "${action:-0.5}" deliberate balanced shipper)"
-    scope_b="$(_band "${scope:-0.5}" lean balanced ambitious)"
+    action_b="$(_band "${action:-0.5}" deliberate balanced action-oriented)"
+    scope_b="$(_band "${scope:-0.5}" focused balanced ambitious)"
     arch_b="$(_band "${arch:-0.5}" pragmatic balanced principled)"
     echo "$key: $risk_b · $action_b · $scope_b · $arch_b"
     ;;
@@ -254,24 +267,34 @@ case "$cmd" in
     scope="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.scope_appetite // empty' "$CONFIG_FILE")"
     rigor="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.test_rigor // empty' "$CONFIG_FILE")"
     arch="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.architecture_care // empty' "$CONFIG_FILE")"
+    detail="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.detail_preference // empty' "$CONFIG_FILE")"
+    auton="$(jq -r --arg k "$key" '.profile.subprofiles[$k].developer.autonomy // empty' "$CONFIG_FILE")"
     label="$(jq -r --arg k "$key" '.profile.subprofiles[$k].label // $k' "$CONFIG_FILE")"
     desc="$(jq -r --arg k "$key" '.profile.subprofiles[$k].description // ""' "$CONFIG_FILE")"
     declared="$(jq -r --arg k "$key" '.profile.subprofiles[$k].declared_at // "never"' "$CONFIG_FILE")"
     samples="$(jq -r --arg k "$key" '.profile.subprofiles[$k].inferred.sample_count // 0' "$CONFIG_FILE")"
+    disc_bin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.discipline_bin // ""' "$CONFIG_FILE")"
+    amb_bin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.ambition_bin // ""' "$CONFIG_FILE")"
 
     if [ "$key" = "$active" ]; then
-      echo "SUBPROFILE: $key ($origin, active) — $label"
+      echo "ARCHETYPE: $key ($origin, active)"
     else
-      echo "SUBPROFILE: $key ($origin) — $label"
+      echo "ARCHETYPE: $key ($origin)"
     fi
-    [ -n "$desc" ] && echo "  $desc"
+    [ "$key" != "$label" ] && echo "  label: $label"
+    if [ -n "$disc_bin" ] && [ -n "$amb_bin" ]; then
+      echo "  $disc_bin x $amb_bin"
+    fi
+    [ -n "$desc" ] && [ "$origin" = "manual" ] && echo "  $desc"
     echo ""
-    echo "DEVELOPER"
+    echo "DIMENSIONS"
     printf "  risk_tolerance:    %s (%s)\n" "${risk:-unset}" "$(_band "${risk:-0.5}" cautious balanced bold)"
-    printf "  bias_for_action:   %s (%s)\n" "${action:-unset}" "$(_band "${action:-0.5}" deliberate balanced shipper)"
-    printf "  scope_appetite:    %s (%s)\n" "${scope:-unset}" "$(_band "${scope:-0.5}" lean balanced ambitious)"
-    printf "  test_rigor:        %s (%s)\n" "${rigor:-unset}" "$(_band "${rigor:-0.5}" happy-path balanced full-coverage)"
+    printf "  bias_for_action:   %s (%s)\n" "${action:-unset}" "$(_band "${action:-0.5}" deliberate balanced action-oriented)"
+    printf "  scope_appetite:    %s (%s)\n" "${scope:-unset}" "$(_band "${scope:-0.5}" focused balanced ambitious)"
+    printf "  test_rigor:        %s (%s)\n" "${rigor:-unset}" "$(_band "${rigor:-0.5}" lean balanced rigorous)"
     printf "  architecture_care: %s (%s)\n" "${arch:-unset}" "$(_band "${arch:-0.5}" pragmatic balanced principled)"
+    printf "  detail_preference: %s (%s)\n" "${detail:-unset}" "$(_band "${detail:-0.5}" terse balanced thorough)"
+    printf "  autonomy:          %s (%s)\n" "${auton:-unset}" "$(_band "${auton:-0.5}" collaborative balanced autonomous)"
 
     if [ "$origin" = "inferred" ]; then
       echo ""
