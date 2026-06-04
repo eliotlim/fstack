@@ -37,10 +37,13 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
+"$_FSTACK_BIN/fstack-profile" suggest
 "$_FSTACK_BIN/fstack-profile" calibrate scaffold
 echo "STACK:"
 "$_FSTACK_BIN/fstack-profile" stack
 ```
+
+If `SUGGEST:` printed, surface it in one short line before proceeding. Don't block.
 
 All dimensions unset? Warn once: "Profile undeclared. Using balanced defaults. Declare via /fstack-profile or just keep working; clustering will learn." Continue.
 
@@ -68,13 +71,15 @@ Existing patterns beat declared stack. If they disagree (declared React, repo Vu
 
 Re-print the calibration block, then map.
 
-| Dim | Pragmatic / Lean / Stability | Balanced | Principled / Rigorous / Speed |
-|-----|------------------------------|----------|--------------------------------|
-| `scope_appetite` | 1 file | folder + index | folder + sub-routes + tests + types + README |
-| `test_rigor` | none | smoke | unit + integration + e2e |
-| `architecture_care` | inline | clean exports | interfaces + DI + types-first |
-| `bias_for_action` | skip TODOs | TODO at boundaries | TODO every edge with acceptance criteria |
-| `risk_tolerance` | battle-tested | modern + supported | newer patterns (server components, signals) |
+| Dim | Low end | Balanced | High end |
+|-----|---------|----------|----------|
+| `scope_appetite` (focused → ambitious) | 1 file | folder + index | folder + sub-routes + tests + types + README |
+| `test_rigor` (lean → rigorous) | none | smoke | unit + integration + e2e |
+| `architecture_care` (pragmatic → principled) | inline | clean exports | interfaces + DI + types-first |
+| `bias_for_action` (deliberate → action) | skip TODOs | TODO at boundaries | TODO every edge with acceptance criteria |
+| `risk_tolerance` (stability → speed) | battle-tested | modern + supported | newer patterns (server components, signals) |
+| `detail_preference` (detail-oriented → big-picture) | inline JSDoc, prop tables, usage snippet in README | minimal types | no comments, no README, code-only |
+| `autonomy` (seek-permission → ask-forgiveness) | propose file list + confirm + write | propose + write | write + show diff |
 
 Conflict (focused scope + rigorous tests) → scope wins. Coverage on small surface beats partial on sprawl.
 
@@ -91,7 +96,9 @@ Tests: <none|smoke|full> (test_rigor=<v>)
 Calibration: <archetype> · <dim>=<band> · ...
 ```
 
-AskUserQuestion: apply / change / cancel. Redirect → re-propose.
+If `autonomy` reads as seek-permission: AskUserQuestion (apply / change / cancel).
+If `autonomy` reads as ask-forgiveness: write + show diff. User redirects after.
+Default: AskUserQuestion.
 
 ## 5. Write
 
@@ -115,9 +122,17 @@ Run any safety check already wired (`tsc --noEmit`, `bun test`, `pytest -q`). Do
   --annotation "<tests outcome>"
 [ "$user_shrank" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log scope_appetite 0.25 \
   --skill fstack-scaffold --annotation "User shrank scaffold plan"
+
+# detail_preference: code only = 0.8, JSDoc + README + types = 0.2
+"$_FSTACK_BIN/fstack-observe" log detail_preference <signal> --skill fstack-scaffold \
+  --annotation "<docs depth>"
+
+# autonomy: confirmed plan = 0.2, wrote + diffed = 0.8
+"$_FSTACK_BIN/fstack-observe" log autonomy <signal> --skill fstack-scaffold \
+  --annotation "<confirmed | autonomous>"
 ```
 
-Good annotations: "Scaffolded teams page with smoke test", "Built admin route, no tests requested", "Quick prototype, single file".
+Good annotations: "Scaffolded teams page with smoke test", "Built admin route, no tests requested", "Quick prototype, single file", "Wrote without plan-confirm, just diff".
 
 Bad annotations: "did the work", "logged signal", "scaffolding done".
 

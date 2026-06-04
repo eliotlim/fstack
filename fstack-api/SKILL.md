@@ -37,13 +37,16 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
+"$_FSTACK_BIN/fstack-profile" suggest
 "$_FSTACK_BIN/fstack-profile" calibrate api
 echo "STACK:"
 "$_FSTACK_BIN/fstack-config" get-active stack.backend_framework
 "$_FSTACK_BIN/fstack-config" get-active stack.language
 ```
 
-The `CALIBRATION` block prints the active subprofile name and the dim values driving the proposal. Re-print the same block in step 3 so the user sees how it shaped the plan.
+If `SUGGEST:` printed, surface it in one short line before proceeding: "Heads up: this looks like `<match>` mode. Continue with `<active>` or switch?" Don't block on AskUserQuestion; the user can ignore.
+
+The `CALIBRATION` block prints the active subprofile name and the dim values driving the proposal. Re-print on the proposal so the user sees how it shaped the plan.
 
 ## 1. Endpoint summary
 
@@ -89,6 +92,10 @@ CALIBRATION (production):
 | `test_rigor` lean | skip tests |
 | `test_rigor` balanced | smoke (happy + one 4xx) |
 | `test_rigor` rigorous | smoke + auth-failure + edges + integration |
+| `detail_preference` detail-oriented | field-level error responses, error codes, named status enums |
+| `detail_preference` big-picture | single 400 with `flatten()`, generic error shape |
+| `autonomy` seek-permission | AskUserQuestion at every decision point (auth required? validation level? error shape?) before writing |
+| `autonomy` ask-forgiveness | decide based on profile + repo patterns, write, report |
 
 Unset dim is treated as balanced.
 
@@ -109,7 +116,9 @@ Auth: <required|optional|none>
 Calibration: <one-line restatement of the dim values applied>
 ```
 
-AskUserQuestion: apply / change / cancel.
+If `autonomy` reads as seek-permission, AskUserQuestion: apply / change / cancel.
+If `autonomy` reads as ask-forgiveness, write and report; the user can amend after.
+Default (unset / balanced): AskUserQuestion.
 
 ## 5. Write
 
@@ -168,9 +177,18 @@ Annotations are short, concrete, human-readable. They feed clustering.
   --annotation "<test style>"
 [ "$tests_dropped" = "yes" ] && "$_FSTACK_BIN/fstack-observe" log test_rigor 0.2 \
   --skill fstack-api --annotation "User dropped tests on <path>"
+
+# detail_preference: generic 400=0.2, named statuses + per-field errors=0.85
+"$_FSTACK_BIN/fstack-observe" log detail_preference <signal> --skill fstack-api \
+  --annotation "<error shape used>"
+
+# autonomy: pre-write confirmation=0.2, wrote+reported=0.8
+# Log on the choice that actually happened, not the configured value.
+"$_FSTACK_BIN/fstack-observe" log autonomy <signal> --skill fstack-api \
+  --annotation "<asked|wrote-then-reported>"
 ```
 
-Good annotations: "POST /teams/invite in tRPC, separate schema + types", "Quick GET /me handler, no validation".
+Good annotations: "POST /teams/invite in tRPC, separate schema + types", "Quick GET /me handler, no validation", "Per-field error codes for /signup", "Wrote /me handler without confirm".
 
 ## 7. Report
 

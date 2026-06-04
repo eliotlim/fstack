@@ -69,13 +69,14 @@ _assert_exists() {
   [ "$has" = "true" ] || { echo "fstack-profile: no subprofile '$k'" >&2; exit 1; }
 }
 
-# Dims a skill cares about, in display order.
+# Dims a skill cares about, in display order. All 7 are load-bearing somewhere.
 _skill_dims() {
   case "$1" in
-    api)      echo "risk_tolerance architecture_care test_rigor";;
-    schema)   echo "architecture_care scope_appetite risk_tolerance test_rigor";;
-    scaffold) echo "scope_appetite test_rigor architecture_care bias_for_action risk_tolerance";;
-    stack)    echo "bias_for_action architecture_care risk_tolerance";;
+    api)      echo "risk_tolerance architecture_care test_rigor detail_preference autonomy";;
+    schema)   echo "architecture_care scope_appetite risk_tolerance test_rigor detail_preference autonomy";;
+    scaffold) echo "scope_appetite test_rigor architecture_care bias_for_action risk_tolerance detail_preference autonomy";;
+    stack)    echo "bias_for_action architecture_care risk_tolerance detail_preference autonomy";;
+    skill)    echo "detail_preference autonomy";;
     *)        echo "risk_tolerance bias_for_action scope_appetite test_rigor architecture_care detail_preference autonomy";;
   esac
 }
@@ -257,14 +258,34 @@ case "$cmd" in
     key="$(_resolve_key "${2:-}")"
     _assert_exists "$key"
     pinned="$(jq -r '.profile.pinned // ""' "$CONFIG_FILE")"
-    suffix=""
-    [ -n "$pinned" ] && [ "$pinned" = "$key" ] && suffix=", pinned"
-    echo "CALIBRATION ($key$suffix):"
+    origin="$(jq -r --arg k "$key" '.profile.subprofiles[$k].origin // "manual"' "$CONFIG_FILE")"
+    obs="$(jq -r --arg k "$key" '.profile.subprofiles[$k].cluster_meta.observation_count // 0' "$CONFIG_FILE")"
+    suffix="$origin"
+    [ -n "$pinned" ] && [ "$pinned" = "$key" ] && suffix="$suffix, pinned"
+    [ "$origin" = "inferred" ] && [ "$obs" -gt 0 ] && suffix="$suffix, $obs obs"
+    echo "CALIBRATION ($key, $suffix):"
     for d in $(_skill_dims "$skill_name"); do
       v="$(jq -r --arg k "$key" --arg d "$d" '.profile.subprofiles[$k].developer[$d] // empty' "$CONFIG_FILE")"
       lbl="$(_band_label "$d" "${v:-}")"
       printf "  %-20s %-6s (%s)\n" "$d" "${v:-unset}" "$lbl"
     done
+    ;;
+
+  suggest)
+    # Print one-line SUGGEST when the current context's match differs from
+    # active and the user hasn't pinned / disabled. Silent otherwise.
+    suggest_on="$(jq -r '.profile.auto_suggest' "$CONFIG_FILE")"
+    pinned="$(jq -r '.profile.pinned' "$CONFIG_FILE")"
+    [ "$suggest_on" != "true" ] && exit 0
+    [ "$pinned" != "null" ] && [ -n "$pinned" ] && exit 0
+    active="$(jq -r '.profile.active' "$CONFIG_FILE")"
+    match="$("$BIN_DIR/fstack-cluster" match 2>/dev/null)"
+    [ -z "$match" ] && exit 0
+    [ "$match" = "$active" ] && exit 0
+    obs="$(jq -r --arg k "$match" '.profile.subprofiles[$k].cluster_meta.observation_count // 0' "$CONFIG_FILE")"
+    repo="$(git rev-parse --show-toplevel 2>/dev/null | awk -F/ '{print $NF}')"
+    branch="$(git branch --show-current 2>/dev/null || echo "")"
+    echo "SUGGEST: $match (matches ${repo:-?}:${branch:-?}, $obs obs, current $active). switch with: fstack-profile use $match"
     ;;
 
   vibe)

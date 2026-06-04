@@ -32,6 +32,7 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
+"$_FSTACK_BIN/fstack-profile" calibrate skill
 _CUSTOM_DIR="$HOME/.fstack/skills"
 _INSTALL_DIR="$("$_FSTACK_BIN/fstack-config" get install.install_path)"
 [ -z "$_INSTALL_DIR" ] && _INSTALL_DIR="$HOME/.claude/skills"
@@ -48,6 +49,15 @@ mkdir -p "$_CUSTOM_DIR"
 5. remove
 
 Ambiguous? List first, then ask.
+
+## Calibrate
+
+| Dim | Effect |
+|-----|--------|
+| `detail_preference` detail-oriented | Use the Workflow template (numbered branches, explicit AskUserQuestion gates); fill triggers list; add an `Examples` section |
+| `detail_preference` big-picture | Use the Checklist or Knowledge template; minimal frontmatter; no examples block |
+| `autonomy` seek-permission | Three questions max (slug, description, style); confirm slug; confirm before symlink |
+| `autonomy` ask-forgiveness | Derive slug from description, pick Checklist as default style, create + symlink, report path. User edits after |
 
 ## 1. List
 
@@ -101,7 +111,15 @@ Stub style: open in `$EDITOR` if set, else print the path.
 Creating a custom skill is a high `bias_for_action` signal:
 
 ```bash
-"$_FSTACK_BIN/fstack-observe" log bias_for_action 0.75 --weight 1 --skill fstack-skill --context "created custom skill"
+"$_FSTACK_BIN/fstack-observe" log bias_for_action 0.75 --weight 1 --skill fstack-skill --annotation "created custom skill: <slug>"
+
+# Confirmed each step = 0.2, autopiloted = 0.8
+"$_FSTACK_BIN/fstack-observe" log autonomy <signal> --skill fstack-skill \
+  --annotation "<confirmed each step | autonomous>"
+
+# Workflow template = 0.2, Checklist = 0.5, Knowledge or Stub = 0.7
+"$_FSTACK_BIN/fstack-observe" log detail_preference <signal> --skill fstack-skill \
+  --annotation "<style> template"
 ```
 
 ## 3. Show

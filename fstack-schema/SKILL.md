@@ -37,11 +37,14 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
+"$_FSTACK_BIN/fstack-profile" suggest
 "$_FSTACK_BIN/fstack-profile" calibrate schema
 echo "STACK:"
 "$_FSTACK_BIN/fstack-config" get-active stack.database
 "$_FSTACK_BIN/fstack-config" get-active stack.orm
 ```
+
+If `SUGGEST:` printed, surface it in one line ("Heads up: this looks like `<match>` mode") before proceeding. Don't block.
 
 ## 1. What's the change?
 
@@ -91,6 +94,10 @@ CALIBRATION (production):
 | `risk_tolerance` stability | reversible migrations only |
 | `risk_tolerance` speed | one-way OK |
 | `test_rigor` rigorous | add seed/fixture |
+| `detail_preference` detail-oriented | column comments, named indexes, named FK constraints, explicit collations |
+| `detail_preference` big-picture | ORM defaults, no comments, anonymous constraints |
+| `autonomy` seek-permission | confirm before every destructive change (drop, rename, type change); confirm migration name |
+| `autonomy` ask-forgiveness | make reversible changes autonomously; halt + ask only on irreversible ops (drop, narrow type, NOT NULL on populated col) |
 
 "Just add X" beats declared profile.
 
@@ -111,7 +118,9 @@ Reversibility: <fully|one-way>
 Calibration: <one-line restatement>
 ```
 
-AskUserQuestion: apply / change / cancel.
+If `autonomy` reads as seek-permission, AskUserQuestion: apply / change / cancel.
+If `autonomy` reads as ask-forgiveness, apply when reversible; AskUserQuestion only when the change is irreversible (drop column / drop table / narrow type / NOT NULL on existing rows).
+Default: AskUserQuestion.
 
 ## 5. Write
 
@@ -164,9 +173,17 @@ Grep for typed queries on the changed table. List them. Ask before updating.
   --skill fstack-schema --annotation "Reversible migration on <table>"
 [ "$reversible" = "no" ] && "$_FSTACK_BIN/fstack-observe" log risk_tolerance 0.75 \
   --skill fstack-schema --annotation "One-way migration on <table>"
+
+# detail_preference: bare ORM = 0.7, named/commented = 0.2
+"$_FSTACK_BIN/fstack-observe" log detail_preference <signal> --skill fstack-schema \
+  --annotation "<named constraints | bare defaults>"
+
+# autonomy: confirmed each step = 0.2, wrote reversible without ask = 0.8
+"$_FSTACK_BIN/fstack-observe" log autonomy <signal> --skill fstack-schema \
+  --annotation "<confirmed | autonomous>"
 ```
 
-Good annotations: "teams table in Drizzle: FK + ON DELETE CASCADE + slug index", "SQLite, one denormalized table".
+Good annotations: "teams table in Drizzle: FK + ON DELETE CASCADE + slug index", "SQLite, one denormalized table", "Named indexes idx_teams_slug + idx_teams_owner", "Wrote reversible add-column without confirm".
 
 ## 8. Report
 

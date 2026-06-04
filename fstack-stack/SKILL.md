@@ -45,10 +45,11 @@ if [ ! -x "$_FSTACK_BIN/fstack-config" ]; then
   for cand in "$HOME/Workspaces/fstack/bin" "$HOME/fstack/bin"; do [ -x "$cand/fstack-config" ] && _FSTACK_BIN="$cand" && break; done
 fi
 "$_FSTACK_BIN/fstack-config" exists || { echo "uninitialized. run /fstack"; exit 0; }
-echo "ACTIVE: $("$_FSTACK_BIN/fstack-config" active)"
+"$_FSTACK_BIN/fstack-profile" suggest
+"$_FSTACK_BIN/fstack-profile" calibrate stack
 ```
 
-State the active subprofile up front. If the user's intent reads like a different mode ("for prod I use X"), offer to switch or create first.
+State the active subprofile up front. If the user's intent reads like a different mode ("for prod I use X"), offer to switch or create first. If `SUGGEST:` printed, surface it before proceeding.
 
 ## Branch
 
@@ -102,6 +103,10 @@ Tilt recommendations from the active subprofile's declared dimensions:
 - `architecture_care ≥ 0.65` (principled): explicit + typed (Hono + Kysely, Fastify + raw, Drizzle over Prisma).
 - `risk_tolerance ≤ 0.35` (stability): boring (Postgres, Node, React).
 - `risk_tolerance ≥ 0.65` (speed): newer fair game (Bun, Effect, latest frameworks).
+- `detail_preference ≤ 0.35` (detail-oriented): pin versions; specify storage, cache, queue choices; surface `engines` field.
+- `detail_preference ≥ 0.65` (big-picture): use latest; trust ecosystem defaults; no version pinning.
+- `autonomy ≤ 0.35` (seek-permission): walk every category individually via AskUserQuestion.
+- `autonomy ≥ 0.65` (ask-forgiveness): propose the full stack in one block; user removes lines they don't want.
 
 After each pick:
 
